@@ -24,13 +24,39 @@ Group:          Applications/Databases
 Vendor:         MariaDB Foundation
 BuildRoot:      %_topdir/mariadb-%{version}
 
-Source0:  https://github.com/shatteredsilicon/mariadb-server/archive/refs/tags/mariadb-%{mariadb_version}.tar.gz
+Source0:  mariadb-server-mariadb-%{mariadb_version}.tar.gz
 Source1:  https://github.com/MariaDB/mariadb-connector-c/archive/%{libmariadb_commit}/mariadb-connector-c-%{libmariadb_commit}.tar.gz
 Source2:  https://github.com/wolfSSL/wolfssl/archive/%{wolfssl_commit}/wolfssl-%{wolfssl_commit}.tar.gz
 
 Patch1: 0001-Allow-building-with-flto-flag.patch
 
-BuildRequires: bison boost-devel coreutils checkpolicy binutils cmake make libcurl-devel ncurses-devel systemtap-sdt-devel libevent-devel libaio-devel cracklib-devel glibc-devel zlib-devel xz-devel systemd-devel libxcrypt-devel java-1.8.0-openjdk java-1.8.0-openjdk-headless Judy-devel krb5-devel libxml2-devel libxml2 unixODBC-devel unixODBC openssl-devel pam-devel pkgconf-pkg-config readline-devel policycoreutils libzstd-devel snappy-devel lz4-devel gnutls-devel llvm lld clang gperftools-devel procps-ng perl
+BuildRequires: bison boost-devel coreutils checkpolicy binutils cmake make
+BuildRequires: libcurl-devel ncurses-devel systemtap-sdt-devel libevent-devel libaio-devel
+BuildRequires: cracklib-devel glibc-devel zlib-devel xz-devel systemd-devel
+BuildRequires: Judy-devel krb5-devel libxml2-devel unixODBC-devel unixODBC
+BuildRequires: openssl-devel pam-devel readline-devel policycoreutils libzstd-devel
+BuildRequires: snappy-devel lz4-devel gnutls-devel llvm lld clang gperftools-devel
+BuildRequires: procps-ng perl
+
+# EL7 still gets crypt(3) development headers from glibc. EL8+ split them into
+# libxcrypt-devel.
+%if 0%{?rhel} >= 8
+BuildRequires: libxcrypt-devel
+%endif
+
+# pkgconf-pkg-config replaced the legacy pkgconfig package starting with EL8.
+%if 0%{?rhel} == 7
+BuildRequires: pkgconfig
+%else
+BuildRequires: pkgconf-pkg-config
+%endif
+
+# OpenJDK 8 is available through EL9, while EL10 ships newer supported JDKs.
+%if 0%{?rhel} >= 10
+BuildRequires: java-21-openjdk java-21-openjdk-headless
+%else
+BuildRequires: java-1.8.0-openjdk java-1.8.0-openjdk-headless
+%endif
 
 %define debug_package %{nil}
 
@@ -95,7 +121,17 @@ export CPPFLAGS='-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--str
 export LDFLAGS='-Wl,--gc-sections -Wl,--strip-all'
 
 %ifarch x86_64
+# Keep the binary ISA baseline aligned with the selected EL generation.
+# GCC/Clang spell the x86-64-v1 baseline simply as "x86-64".
+%if 0%{?rhel} >= 10
+export CPPFLAGS="${CPPFLAGS} -march=x86-64-v3 -mtune=generic"
+%else
+%if 0%{?rhel} >= 9
 export CPPFLAGS="${CPPFLAGS} -march=x86-64-v2 -mtune=westmere"
+%else
+export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
+%endif
+%endif
 %endif
 
 '/usr/bin/cmake'  -DRPM=rh%{suffix:%dist} \
