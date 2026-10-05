@@ -1,0 +1,378 @@
+/* groovylint-disable LineLength, NestedBlockDepth */
+
+@Library('shatteredsilicon') _
+
+pipeline {
+  agent {
+    label 'rpm-x86_64'
+  }
+
+  parameters {
+    string(name: 'UPSTREAM_BRANCH', defaultValue: '', description: 'Branch in shatteredsilicon/mariadb-server. Used only when UPSTREAM_TAG is empty, e.g. 10.4.35')
+    string(name: 'UPSTREAM_TAG', defaultValue: '', description: 'Tag in shatteredsilicon/mariadb-server. Takes precedence over UPSTREAM_BRANCH, e.g. mariadb-10.4.34')
+    choice(name: 'EPEL', choices: ['10', '9', '8', '7'], description: 'Target EL/EPEL release')
+    booleanParam(name: 'PUSH_TO_SS_MISC', defaultValue: false, description: 'Publish tag builds to SS misc through the package signer. Branch-only builds are never published.')
+    string(name: 'THREAD_TS', defaultValue: '', description: 'Slack parent thread timestamp for watcher-triggered notifications')
+  }
+
+  environment {
+    RPM_PACKAGE_SIGNER_HOST_CREDENTIALS_ID = 'rpm-package-signer-host'
+    RPM_PACKAGE_SIGNER_INBOX_CREDENTIALS_ID = 'rpm-package-signer-inbox-target'
+    RPM_PACKAGE_SIGNER_PATH_CREDENTIALS_ID = 'rpm-package-signer-path'
+    RPM_PACKAGE_SIGNER_CONFIG_CREDENTIALS_ID = 'packagesigner-mysql.conf'
+    SLACK_WEBHOOK_CREDENTIALS_ID = 'slack-webhook-url'
+    SLACK_BOT_TOKEN_CREDENTIALS_ID = 'slack-bot-token'
+    SLACK_CHANNEL_ID_CREDENTIALS_ID = 'slack-channel-id'
+  }
+
+  options {
+    buildDiscarder(logRotator(
+      numToKeepStr: '3',
+      artifactNumToKeepStr: '3'
+    ))
+    disableConcurrentBuilds()
+    timestamps()
+  }
+
+  stages {
+    stage('Initialize') {
+      steps {
+        script {
+          String upstreamBranch = (params.UPSTREAM_BRANCH ?: '').trim()
+          String upstreamTag = (params.UPSTREAM_TAG ?: '').trim()
+
+          if (!upstreamBranch && !upstreamTag) {
+            error('At least one of UPSTREAM_BRANCH or UPSTREAM_TAG must be provided.')
+          }
+
+          String sourceKind = upstreamTag ? 'tag' : 'branch'
+          String sourceRef = upstreamTag ?: upstreamBranch
+          if (!(sourceRef ==~ /^[A-Za-z0-9._\/-]+$/)) {
+            error("The selected upstream ref contains unsupported characters: '${sourceRef}'")
+          }
+
+          String packageVersion
+          if (sourceKind == 'tag') {
+            if (!(upstreamTag ==~ /^mariadb-[0-9]+(?:\.[0-9]+){2,3}$/)) {
+              error("UPSTREAM_TAG must look like mariadb-10.4.34; got '${upstreamTag}'")
+            }
+            packageVersion = upstreamTag.replaceFirst(/^mariadb-/, '')
+          } else {
+            packageVersion = sh(
+              script: '''
+                set -euo pipefail
+                awk '$1 == "%global" && $2 == "mariadb_version" { print $3; found=1; exit } END { if (!found) exit 1 }' \
+                  rpmbuild/SPECS/MariaDB.spec
+              '''.stripIndent().trim(),
+              returnStdout: true
+            ).toString().trim()
+
+            if (!(packageVersion ==~ /^[0-9]+(?:\.[0-9]+){2,3}$/)) {
+              error("Unable to determine a valid mariadb_version from the spec: '${packageVersion}'")
+            }
+          }
+
+          String releasever = (params.EPEL ?: '10').trim()
+          String basearch = 'x86_64'
+          String mockTarget = releasever == '7'
+            ? 'oraclelinux-7-x86_64'
+            : "alma+epel-${releasever}-x86_64"
+
+          org.shatteredsilicon.jenkins.model.BuildTarget target = rpm.resolveTarget(
+            release: releasever,
+            arch: basearch,
+            supportedReleases: ['7', '8', '9', '10'],
+            supportedArches: ['x86_64'],
+            mockTarget: mockTarget
+          )
+
+          Map<String, String> isaTargets = [
+            '7': 'x86-64-v1',
+            '8': 'x86-64-v1',
+            '9': 'x86-64-v2',
+            '10': 'x86-64-v3'
+          ]
+
+          boolean publishRequested = params.PUSH_TO_SS_MISC == true
+          boolean publishAllowed = sourceKind == 'tag' && publishRequested
+
+          Map<String, String> externalConfiguration = [
+            SLACK_WEBHOOK_CREDENTIALS_ID: env.SLACK_WEBHOOK_CREDENTIALS_ID,
+            SLACK_BOT_TOKEN_CREDENTIALS_ID: env.SLACK_BOT_TOKEN_CREDENTIALS_ID,
+            SLACK_CHANNEL_ID_CREDENTIALS_ID: env.SLACK_CHANNEL_ID_CREDENTIALS_ID
+          ]
+
+          if (publishAllowed) {
+            externalConfiguration.putAll([
+              RPM_PACKAGE_SIGNER_HOST_CREDENTIALS_ID: env.RPM_PACKAGE_SIGNER_HOST_CREDENTIALS_ID,
+              RPM_PACKAGE_SIGNER_INBOX_CREDENTIALS_ID: env.RPM_PACKAGE_SIGNER_INBOX_CREDENTIALS_ID,
+              RPM_PACKAGE_SIGNER_PATH_CREDENTIALS_ID: env.RPM_PACKAGE_SIGNER_PATH_CREDENTIALS_ID,
+              RPM_PACKAGE_SIGNER_CONFIG_CREDENTIALS_ID: env.RPM_PACKAGE_SIGNER_CONFIG_CREDENTIALS_ID
+            ])
+          }
+          ci.validateRequiredParameters(externalConfiguration, externalConfiguration.keySet())
+
+          env.SOURCE_KIND = sourceKind
+          env.SOURCE_REF = sourceRef
+          env.PACKAGE_VERSION = packageVersion
+          env.RELEASEVER = target.release
+          env.BASEARCH = target.arch
+          env.MOCK_TARGET_NAME = target.mockTarget
+          env.ISA_TARGET = isaTargets[releasever]
+          env.PUBLISH_TO_SS_MISC = publishAllowed ? 'true' : 'false'
+
+          if (sourceKind == 'branch' && publishRequested) {
+            echo 'PUSH_TO_SS_MISC was requested, but branch-only builds are intentionally build-only. Publication is disabled.'
+          }
+        }
+
+        echo "Using MariaDB source: ${env.SOURCE_KIND} ${env.SOURCE_REF}"
+        echo "Using RPM version: ${env.PACKAGE_VERSION}"
+        echo "Using EPEL release: ${env.RELEASEVER}"
+        echo "Using architecture: ${env.BASEARCH}"
+        echo "Using CPU ISA target: ${env.ISA_TARGET}"
+        echo "Using Mock target: ${env.MOCK_TARGET_NAME}"
+        echo "Publish to SS misc: ${env.PUBLISH_TO_SS_MISC}"
+      }
+    }
+
+    stage('Validate build node') {
+      steps {
+        script {
+          List<String> requiredCommands = [
+            'awk', 'gzip', 'mock', 'python3', 'rpm', 'rpmbuild', 'tar', 'wget'
+          ]
+          if (env.PUBLISH_TO_SS_MISC == 'true') {
+            requiredCommands.addAll(['base64', 'scp', 'ssh'])
+          }
+
+          ci.validateBuildNode(
+            expectedArchitecture: env.BASEARCH,
+            requiredCommands: requiredCommands,
+            mockTarget: env.MOCK_TARGET_NAME
+          )
+        }
+      }
+    }
+
+    stage('Prepare workspace') {
+      steps {
+        script {
+          ci.prepareWorkspace(
+            clean: ['work', 'artifacts'],
+            create: ['work', 'artifacts']
+          )
+        }
+        sh(
+          script: '''
+            set -euo pipefail
+            cp -a rpmbuild work/rpmbuild
+          '''.stripIndent().trim()
+        )
+      }
+    }
+
+    stage('Update spec from tag') {
+      when {
+        expression { env.SOURCE_KIND == 'tag' }
+      }
+      steps {
+        script {
+          rpm.updateSpec(
+            specFile: 'work/rpmbuild/SPECS/MariaDB.spec',
+            version: env.PACKAGE_VERSION,
+            versionMacro: 'mariadb_version',
+            preserveVersionField: false,
+            updateChangelog: false
+          )
+        }
+      }
+    }
+
+    stage('Prepare source') {
+      steps {
+        sh(
+          script: '''
+            set -euo pipefail
+            cd work/rpmbuild/SOURCES
+            chmod +x prep-mariadb.sh
+            ./prep-mariadb.sh "$SOURCE_KIND" "$SOURCE_REF" "$PACKAGE_VERSION"
+          '''.stripIndent().trim()
+        )
+      }
+    }
+
+    stage('Build source RPM') {
+      steps {
+        sh(
+          script: '''
+            set -euo pipefail
+            mkdir -p \
+              work/rpmbuild/BUILD \
+              work/rpmbuild/BUILDROOT \
+              work/rpmbuild/RPMS \
+              work/rpmbuild/SRPMS
+
+            rpmbuild -bs \
+              --define "_topdir $WORKSPACE/work/rpmbuild" \
+              --define "dist .el$RELEASEVER" \
+              --define "rhel $RELEASEVER" \
+              work/rpmbuild/SPECS/MariaDB.spec
+
+            find work/rpmbuild/SRPMS -maxdepth 1 -type f \
+              -name "MariaDB-$PACKAGE_VERSION-*.src.rpm" \
+              -print -quit | grep -q .
+          '''.stripIndent().trim()
+        )
+      }
+    }
+
+    stage('Build RPM with Mock') {
+      steps {
+        script {
+          rpm.mockBuild(
+            mockTarget: env.MOCK_TARGET_NAME,
+            sourceRpm: "work/rpmbuild/SRPMS/MariaDB-${env.PACKAGE_VERSION}-*.src.rpm",
+            artifactDirectory: 'artifacts',
+            artifactPatterns: [
+              "MariaDB*-${env.PACKAGE_VERSION}-*.rpm",
+              '*.log',
+              '*.cfg',
+              '*.state'
+            ],
+            requiredArtifactPatterns: [
+              "MariaDB-server-${env.PACKAGE_VERSION}-*.${env.BASEARCH}.rpm",
+              "MariaDB-${env.PACKAGE_VERSION}-*.src.rpm"
+            ]
+          )
+        }
+      }
+    }
+
+    stage('Build summary') {
+      steps {
+        sh(
+          script: '''
+            set -euo pipefail
+
+            echo "MariaDB build completed"
+            echo "  Source:      $SOURCE_KIND $SOURCE_REF"
+            echo "  RPM version: $PACKAGE_VERSION"
+            echo "  EL release:  $RELEASEVER"
+            echo "  ISA target:  $ISA_TARGET"
+            echo "  Mock target: $MOCK_TARGET_NAME"
+            echo
+            echo 'Generated RPMs:'
+
+            find artifacts -maxdepth 1 -type f -name '*.rpm' -print0 \
+              | sort -z \
+              | while IFS= read -r -d '' package; do
+                  rpm -qp --qf '  %{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' "$package"
+                done
+
+            echo
+            echo 'SHA-256:'
+            find artifacts -maxdepth 1 -type f -name '*.rpm' -print0 \
+              | sort -z \
+              | xargs -0 sha256sum
+          '''.stripIndent().trim()
+        )
+      }
+    }
+
+    stage('Publish RPMs to SS misc') {
+      when {
+        expression { env.PUBLISH_TO_SS_MISC == 'true' }
+      }
+      steps {
+        script {
+          rpm.publishViaSigner(
+            artifactsDirectory: 'artifacts',
+            hostCredentialsId: env.RPM_PACKAGE_SIGNER_HOST_CREDENTIALS_ID,
+            inboxCredentialsId: env.RPM_PACKAGE_SIGNER_INBOX_CREDENTIALS_ID,
+            signerPathCredentialsId: env.RPM_PACKAGE_SIGNER_PATH_CREDENTIALS_ID,
+            signerConfigCredentialsId: env.RPM_PACKAGE_SIGNER_CONFIG_CREDENTIALS_ID
+          )
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      script {
+        ci.archiveDiagnostics(
+          directory: 'artifacts',
+          include: ['**/*'],
+          exclude: ['**/*.rpm'],
+          allowEmpty: true,
+          fingerprint: true
+        )
+
+        if (env.PUBLISH_TO_SS_MISC != 'true') {
+          archiveArtifacts(
+            artifacts: 'artifacts/*.rpm',
+            allowEmptyArchive: false,
+            fingerprint: true
+          )
+        }
+
+        String action = env.PUBLISH_TO_SS_MISC == 'true' ? 'Built and published' : 'Built'
+        slackNotify(
+          status: 'success',
+          message: "${action} MariaDB ${env.PACKAGE_VERSION} from ${env.SOURCE_KIND} ${env.SOURCE_REF} for EPEL ${env.RELEASEVER} / ${env.BASEARCH} (${env.ISA_TARGET}) using Mock target ${env.MOCK_TARGET_NAME}. Check Jenkins build: ${env.BUILD_URL}",
+          pipelineName: 'MariaDB RPM pipeline',
+          threadTs: params.THREAD_TS,
+          webhookCredentialsId: env.SLACK_WEBHOOK_CREDENTIALS_ID,
+          botTokenCredentialsId: env.SLACK_BOT_TOKEN_CREDENTIALS_ID,
+          channelIdCredentialsId: env.SLACK_CHANNEL_ID_CREDENTIALS_ID,
+          returnStdout: false
+        )
+      }
+    }
+
+    failure {
+      script {
+        ci.archiveDiagnostics(
+          directory: 'artifacts',
+          include: ['**/*'],
+          exclude: ['**/*.rpm'],
+          allowEmpty: true,
+          fingerprint: true
+        )
+
+        String sourceKind = (env.SOURCE_KIND ?: ((params.UPSTREAM_TAG ?: '').trim() ? 'tag' : 'branch')).trim()
+        String sourceRef = (env.SOURCE_REF ?: params.UPSTREAM_TAG ?: params.UPSTREAM_BRANCH ?: 'unknown').trim()
+        String packageVersion = (env.PACKAGE_VERSION ?: 'unknown').trim()
+        String releasever = (env.RELEASEVER ?: params.EPEL ?: 'unknown').trim()
+        String mockTarget = (env.MOCK_TARGET_NAME ?: (releasever == '7' ? 'oraclelinux-7-x86_64' : "alma+epel-${releasever}-x86_64")).trim()
+        Map<String, String> slackCredentialIds = [
+          webhookCredentialsId: (env.SLACK_WEBHOOK_CREDENTIALS_ID ?: '').trim(),
+          botTokenCredentialsId: (env.SLACK_BOT_TOKEN_CREDENTIALS_ID ?: '').trim(),
+          channelIdCredentialsId: (env.SLACK_CHANNEL_ID_CREDENTIALS_ID ?: '').trim()
+        ]
+
+        if (slackCredentialIds.values().every { String value -> value }) {
+          slackNotify(
+            status: 'failure',
+            message: "MariaDB build failed for ${sourceKind} ${sourceRef}, RPM version ${packageVersion}, EPEL ${releasever} / x86_64 using Mock target ${mockTarget}. Check Jenkins build: ${env.BUILD_URL}",
+            pipelineName: 'MariaDB RPM pipeline',
+            threadTs: params.THREAD_TS,
+            webhookCredentialsId: slackCredentialIds.webhookCredentialsId,
+            botTokenCredentialsId: slackCredentialIds.botTokenCredentialsId,
+            channelIdCredentialsId: slackCredentialIds.channelIdCredentialsId,
+            returnStdout: false
+          )
+        } else {
+          echo 'Slack failure notification skipped because credential IDs are not configured.'
+        }
+      }
+    }
+
+    cleanup {
+      script {
+        ci.cleanup(directories: ['work', 'artifacts'])
+      }
+    }
+  }
+}
