@@ -29,6 +29,10 @@ Source1:  https://github.com/MariaDB/mariadb-connector-c/archive/%{libmariadb_co
 Source2:  https://github.com/wolfSSL/wolfssl/archive/%{wolfssl_commit}/wolfssl-%{wolfssl_commit}.tar.gz
 
 Patch1: 0001-Allow-building-with-flto-flag.patch
+# The CONNECT adapter needs a const-correct libxml2 error API on EL10+.
+%if 0%{?rhel} >= 10
+Patch2: 0002-CONNECT-support-libxml2-2.12-errors.patch
+%endif
 
 BuildRequires: bison boost-devel coreutils checkpolicy binutils cmake make
 BuildRequires: libcurl-devel ncurses-devel systemtap-sdt-devel libevent-devel libaio-devel
@@ -113,6 +117,9 @@ mv -fT mariadb-connector-c-%{libmariadb_commit}* mariadb-server-mariadb-%{mariad
 mv -fT wolfssl-%{wolfssl_commit}* mariadb-server-mariadb-%{mariadb_version}/extra/wolfssl/wolfssl
 
 %patch1 -p1 -d mariadb-server-mariadb-%{mariadb_version}/
+%if 0%{?rhel} >= 10
+%patch2 -p1 -d mariadb-server-mariadb-%{mariadb_version}/
+%endif
 
 %build
 mkdir cpack_rpm_build_dir
@@ -145,7 +152,7 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
                   -DCMAKE_AR=/usr/bin/llvm-ar \
                   -DCMAKE_C_FLAGS="$CPPFLAGS" \
                   -DCMAKE_CXX_FLAGS="$CPPFLAGS" \
-                  -DCMAKE_EXE_LINKER_FLAGS="-ltcmalloc_minimal $LD_FLAGS" \
+                  -DCMAKE_EXE_LINKER_FLAGS="-ltcmalloc_minimal $LDFLAGS" \
                   -DBUILD_CONFIG=mysql_release \
                   -DWITH_EMBEDDED_SERVER=no \
                   -DWITH_SAFEMALLOC=OFF \
