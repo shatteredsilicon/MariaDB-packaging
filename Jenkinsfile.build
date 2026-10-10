@@ -185,18 +185,41 @@ pipeline {
       }
     }
 
-    stage('Update spec from tag') {
+    stage('Update spec and changelog from tag') {
       when {
         expression { env.SOURCE_KIND == 'tag' }
       }
       steps {
         script {
+          // The helper defaults to changelog Release 1, but the uploaded spec
+          // currently builds Release 4. Read its default numeric value rather
+          // than writing a misleading changelog entry for the wrong release.
+          String rpmRelease = sh(
+            script: '''
+              set -euo pipefail
+              awk '
+                /^Release:[[:space:]]*[1-9][0-9]*%[{][?]dist[}][[:space:]]*$/ {
+                  release = $2
+                  sub(/%[{][?]dist[}]$/, "", release)
+                  print release
+                  exit
+                }
+              ' work/rpmbuild/SPECS/MariaDB.spec
+            '''.stripIndent().trim(),
+            returnStdout: true
+          ).toString().trim()
+
+          if (!(rpmRelease ==~ /^[1-9][0-9]*$/)) {
+            error("Cannot determine numeric default Release from MariaDB.spec: '${rpmRelease}'")
+          }
+
           rpm.updateSpec(
             specFile: 'work/rpmbuild/SPECS/MariaDB.spec',
             version: env.PACKAGE_VERSION,
             versionMacro: 'mariadb_version',
+            release: rpmRelease.toInteger(),
             preserveVersionField: false,
-            updateChangelog: false
+            updateChangelog: true
           )
         }
       }

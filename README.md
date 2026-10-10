@@ -191,3 +191,42 @@ For EL7 verify that `devtoolset-11-gcc-c++`, `cmake3`, `Judy-devel` and
 XPath and error handling, not just that the code compiles. Compare binary
 packages and plugin lists with the known-good EL9 build. Keep
 `PUSH_TO_SS_MISC=false` until all desired build variants pass.
+
+## CPack warnings and RPM changelog
+
+The spec uses `%patch -P 1` / `%patch -P 2`, which are supported by old and
+modern versions of RPM. The previous `%patch1` / `%patch2` form is deprecated
+(and is rejected by newer RPM versions).
+
+The EL7 build uses `-DCPACK_RPM_DEBUGINFO_PACKAGE=OFF` at CMake configure time
+and passes the same setting to CPack during `%install`. This is intentional:
+this repository uses `CMAKE_BUILD_TYPE=Release`, linker `--strip-all`, and
+`%define debug_package %{nil}`, so it does not produce usable debuginfo. It
+would be misleading to advertise debug-symbol RPMs for these stripped binaries.
+This override is scoped to EL7; other EL build targets are left unchanged.
+If debuginfo RPMs are later required, that needs a separate packaging change
+that preserves debug symbols (e.g. `RelWithDebInfo`), avoids stripping, and
+validates the produced debuginfo RPMs.
+
+Tag builds use the shared `rpm.updateSpec()` helper to set `mariadb_version`,
+`Version`, and prepend a changelog entry. The `release` argument is read from
+the default numeric `Release:` field of the working spec (currently `4`), to
+avoid the helper's unrelated default of `1`. If the spec's `Release` expression
+changes, update the pipeline extraction rather than silently reporting the
+wrong release. Branch-only builds do not rewrite the spec or add a release
+changelog; they remain build-only.
+
+**Important:** MariaDB's outer spec creates an SRPM, while CPack generates
+new RPM specs for binary components. During `%install`, the packaging spec
+extracts the updated `%changelog` section and passes it using
+`CPACK_RPM_CHANGELOG_FILE`. This ensures the same changelog is available to
+CPack-generated binary RPMs as well as the source RPM. When the source spec
+has no changelog entries (for example a branch-only build), the CPack argument
+is omitted to preserve the previous behavior.
+
+Validate after a tag build using `rpm -qp --changelog artifacts/MariaDB-*.rpm`
+(on an individual binary RPM) and `rpm -qp --changelog ...src.rpm`. Confirm the
+entry uses the exact tag version and the effective numeric release (`4` at
+present), plus the expected maintainer from the shared library. Check that
+EL7 no longer warns about missing debuginfo; validate ELF build IDs, installed
+files, package dependencies and real runtime behavior before publishing.
