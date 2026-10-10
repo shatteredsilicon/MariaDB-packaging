@@ -189,6 +189,9 @@ export CPPFLAGS="${CPPFLAGS} -DGNUTLS_NO_SIGNAL=0"
                   -DCMAKE_CXX_FLAGS="$CPPFLAGS" \
                   -DCMAKE_EXE_LINKER_FLAGS="-ltcmalloc_minimal $LDFLAGS" \
                   -DBUILD_CONFIG=mysql_release \
+%if 0%{?rhel} == 7
+                  -DENABLE_DTRACE=OFF \
+%endif
                   -DWITH_EMBEDDED_SERVER=no \
                   -DWITH_SAFEMALLOC=OFF \
                   -DWITH_SSL=bundled \
@@ -199,6 +202,15 @@ export CPPFLAGS="${CPPFLAGS} -DGNUTLS_NO_SIGNAL=0"
                   -DPLUGIN_SPIDER=NO \
                   -DPLUGIN_SPHINX=NO \
                   -DCPACK_PACKAGING_INSTALL_PREFIX=/ ../mariadb-server-mariadb-%{mariadb_version}
+%if 0%{?rhel} == 7
+# GCC 11 LTO can leave unresolved SDT probe semaphore relocations in MyISAM
+# tools. This packaging build deliberately omits DTrace/SystemTap on EL7.
+# Fail early if an upstream CMake change stops honoring that setting.
+grep -Eq '^ENABLE_DTRACE:[^=]+=OFF$' CMakeCache.txt || {
+    echo 'ERROR: EL7 requires ENABLE_DTRACE=OFF (GCC 11 LTO/SDT compatibility).' >&2
+    exit 1
+}
+%endif
 make %{?_smp_mflags}
 
 %install

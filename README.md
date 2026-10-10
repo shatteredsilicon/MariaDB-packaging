@@ -131,6 +131,20 @@ EPEL rather than dropping features. GCC 11 from `devtoolset-11-gcc-c++` and
 compilation settings are not used on EL7. GCC retains `-flto` and the
 x86-64-v1 baseline. This is an explicit EL7 toolchain exception.
 
+**EL7 GCC 11 LTO and SystemTap SDT probes:** The EL7 `%build` explicitly
+passes `-DENABLE_DTRACE=OFF` to CMake. MariaDB 10.4 can otherwise enable
+DTrace/SystemTap automatically and emit `.note.stapsdt` notes referencing
+`mysql_keycache__*__semaphore` symbols. Under the EL7 GCC 11 / LTO toolchain,
+these may fail to resolve when linking MyISAM utilities (for example,
+`myisamlog` and `myisamchk`). Disabling tracing prevents those SDT notes from
+being generated; it does **not** disable MyISAM, change the ISA target, or
+remove `-flto`. The spec checks `CMakeCache.txt` immediately after configure
+to fail early if DTrace was not disabled. The trade-off is that EL7 binaries
+will not expose MariaDB's DTrace/SystemTap probes. EL8/9/10 CMake behavior is
+unchanged. Verify the resulting EL7 binaries and database workloads before
+publishing them. If EL7 SystemTap instrumentation is a firm requirement,
+investigate a separate toolchain or targeted source/build-system fix instead.
+
 EL7's GnuTLS 3.3 predates `GNUTLS_NO_SIGNAL` (introduced in GnuTLS 3.4.2).
 The spec adds `-DGNUTLS_NO_SIGNAL=0` to `CPPFLAGS` in `%build` **only for EL7**.
 It is propagated through the existing `CMAKE_C_FLAGS` setting to Connector/C's
