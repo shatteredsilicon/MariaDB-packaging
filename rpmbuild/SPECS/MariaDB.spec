@@ -169,6 +169,13 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
 %endif
 %endif
 
+# EL7 GnuTLS 3.3 lacks GNUTLS_NO_SIGNAL (introduced in GnuTLS 3.4.2).
+# Treat the unsupported flag as zero for Connector/C; this restores compilation
+# but does not provide the newer library's SIGPIPE suppression semantics.
+%if 0%{?rhel} == 7
+export CPPFLAGS="${CPPFLAGS} -DGNUTLS_NO_SIGNAL=0"
+%endif
+
 "$CMAKE_BIN"  -DRPM=rh%{suffix:%dist} \
                   -DLZ4_LIBS=%{_libdir}/liblz4.so \
                   -DWITH_INNODB_LZ4=ON \

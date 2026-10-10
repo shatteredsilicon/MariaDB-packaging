@@ -131,6 +131,15 @@ EPEL rather than dropping features. GCC 11 from `devtoolset-11-gcc-c++` and
 compilation settings are not used on EL7. GCC retains `-flto` and the
 x86-64-v1 baseline. This is an explicit EL7 toolchain exception.
 
+EL7's GnuTLS 3.3 predates `GNUTLS_NO_SIGNAL` (introduced in GnuTLS 3.4.2).
+The spec adds `-DGNUTLS_NO_SIGNAL=0` to `CPPFLAGS` in `%build` **only for EL7**.
+It is propagated through the existing `CMAKE_C_FLAGS` setting to Connector/C's
+`libmariadb/secure/gnutls.c`, avoiding a separate source patch. This compiles
+without the unsupported flag, but **does not reproduce its SIGPIPE suppression**.
+Before distributing EL7 RPMs, test client TLS connections and abruptly closed
+connections (including a peer disconnect during write) to detect unwanted
+SIGPIPE-related process termination. No change is made to EL8/9/10 builds.
+
 Oracle Linux 7 is end-of-life; the package repositories may eventually be
 moved or become inaccessible. Check repository access and GPG signing keys
 before building. An available RPM in an Oracle archive does not guarantee all
