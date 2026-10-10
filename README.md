@@ -1,0 +1,232 @@
+# MariaDB RPM packaging
+
+This repository builds the Shattered Silicon MariaDB fork as RPMs with Jenkins,
+`rpmbuild`, Mock, and the `shatteredsilicon` Jenkins shared library.
+
+## Repository layout
+
+```text
+mariadb-packaging/
+├── Jenkinsfile.build
+├── README.md
+├── mock
+│   ├── mariadb-alma-8-x86_64.cfg
+│   └── mariadb-oraclelinux-7-x86_64.cfg
+└── rpmbuild
+    ├── SOURCES
+    │   ├── 0001-Allow-building-with-flto-flag.patch
+    │   ├── 0002-CONNECT-support-libxml2-2.12-errors.patch
+    │   └── prep-mariadb.sh
+    └── SPECS
+        └── MariaDB.spec
+```
+
+## Jenkins parameters
+
+- `UPSTREAM_BRANCH`: branch in `shatteredsilicon/mariadb-server`. It is used only
+  when `UPSTREAM_TAG` is empty. Branch-only builds are always build-only and are
+  never published, even when `PUSH_TO_SS_MISC` is checked.
+- `UPSTREAM_TAG`: tag in `shatteredsilicon/mariadb-server`, for example
+  `mariadb-10.4.34`. When both branch and tag are supplied, the tag wins. The
+  pipeline extracts `10.4.34` from the tag and updates both `mariadb_version` and
+  `Version` in the working copy of `MariaDB.spec`.
+- `EPEL`: target release `7`, `8`, `9`, or `10`. The pipeline builds x86_64 only.
+- `PUSH_TO_SS_MISC`: disabled by default. When enabled for a tag build, both
+  source and binary RPMs are sent through the shared-library package-signer
+  workflow. When disabled, nothing is pushed.
+- `THREAD_TS`: optional Slack parent thread timestamp, matching the other RPM
+  packaging pipelines.
+
+At least one of `UPSTREAM_BRANCH` and `UPSTREAM_TAG` must be supplied.
+
+## Build targets
+
+Each Jenkins invocation builds exactly one EL release in one Mock target:
+
+| EPEL | Mock target | compiler ISA baseline |
+| --- | --- | --- |
+| 7 | `mariadb-oraclelinux-7-x86_64.cfg` (extends `oraclelinux-7-x86_64`) | x86-64-v1 (`-march=x86-64`) |
+| 8 | `mariadb-alma-8-x86_64.cfg` (extends `alma+epel-8-x86_64`) | x86-64-v1 (`-march=x86-64`) |
+| 9 | `alma+epel-9-x86_64` | x86-64-v2 |
+| 10 | `alma+epel-10-x86_64` | x86-64-v3 |
+
+The RPM architecture remains `x86_64`; the ISA baseline is enforced through
+compiler flags in `MariaDB.spec`.
+
+## Source selection
+
+`rpmbuild/SOURCES/prep-mariadb.sh` receives three values from Jenkins:
+
+```text
+prep-mariadb.sh <branch|tag> <upstream-ref> <package-version>
+```
+
+The script downloads the requested `shatteredsilicon/mariadb-server` archive,
+normalizes its top-level directory to the name expected by the spec, and
+fetches the pinned MariaDB Connector/C and wolfSSL source archives.
+
+For a tag build, Jenkins updates the working spec version before running the
+script. For a branch-only build, the repository's current `mariadb_version` is
+kept intentionally so arbitrary development branch names do not become RPM
+versions. The source branch is still printed in the Jenkins build summary.
+
+## Publishing rules
+
+Publishing uses `rpm.publishViaSigner(...)` from the shared library. The signer
+configuration credential ID is:
+
+```text
+packagesigner-mysql.conf
+```
+
+The effective publication rule is:
+
+```text
+publish = PUSH_TO_SS_MISC && source_is_tag
+```
+
+Therefore:
+
+- branch + unchecked: build only
+- branch + checked: build only
+- tag + unchecked: build only
+- tag + checked: publish through SS misc package signer
+
+Build-only runs archive the generated RPMs in Jenkins so they can be downloaded
+without publishing them to a package repository.
+
+## Shared-library compatibility
+
+No shared-library change is required. The pipeline uses the existing public
+operations:
+
+- `ci.validateRequiredParameters`
+- `ci.validateBuildNode`
+- `ci.prepareWorkspace`
+- `ci.archiveDiagnostics`
+- `ci.cleanup`
+- `rpm.resolveTarget`
+- `rpm.updateSpec`
+- `rpm.mockBuild`
+- `rpm.publishViaSigner`
+
+Keeping MariaDB-specific policy in this repository avoids changing behavior for
+Golang or the other packaging pipelines that already consume the shared
+library.
+
+## Legacy EL7, EL8 and EL10 compatibility
+
+These Mock overrides live in this repository and are selected automatically by
+`Jenkinsfile.build`, using an absolute config path. The stock `/etc/mock` files
+remain unchanged. Their respective buildroots are isolated from the standard
+Mock targets. The Jenkins agent must have both stock templates installed.
+
+### EL7
+
+`mock/mariadb-oraclelinux-7-x86_64.cfg` adds Oracle Linux's developer EPEL and
+Software Collections repositories. The EL7 build still requires Judy and zstd,
+including their development headers, but sources them from Oracle developer
+EPEL rather than dropping features. GCC 11 from `devtoolset-11-gcc-c++` and
+`cmake3`/`cpack3` are selected in the spec; the standard EL8+ Clang/LLVM/LLD
+compilation settings are not used on EL7. GCC retains `-flto` and the
+x86-64-v1 baseline. This is an explicit EL7 toolchain exception.
+
+**EL7 GCC 11 LTO and SystemTap SDT probes:** The EL7 `%build` explicitly
+passes `-DENABLE_DTRACE=OFF` to CMake. MariaDB 10.4 can otherwise enable
+DTrace/SystemTap automatically and emit `.note.stapsdt` notes referencing
+`mysql_keycache__*__semaphore` symbols. Under the EL7 GCC 11 / LTO toolchain,
+these may fail to resolve when linking MyISAM utilities (for example,
+`myisamlog` and `myisamchk`). Disabling tracing prevents those SDT notes from
+being generated; it does **not** disable MyISAM, change the ISA target, or
+remove `-flto`. The spec checks `CMakeCache.txt` immediately after configure
+to fail early if DTrace was not disabled. The trade-off is that EL7 binaries
+will not expose MariaDB's DTrace/SystemTap probes. EL8/9/10 CMake behavior is
+unchanged. Verify the resulting EL7 binaries and database workloads before
+publishing them. If EL7 SystemTap instrumentation is a firm requirement,
+investigate a separate toolchain or targeted source/build-system fix instead.
+
+EL7's GnuTLS 3.3 predates `GNUTLS_NO_SIGNAL` (introduced in GnuTLS 3.4.2).
+The spec adds `-DGNUTLS_NO_SIGNAL=0` to `CPPFLAGS` in `%build` **only for EL7**.
+It is propagated through the existing `CMAKE_C_FLAGS` setting to Connector/C's
+`libmariadb/secure/gnutls.c`, avoiding a separate source patch. This compiles
+without the unsupported flag, but **does not reproduce its SIGPIPE suppression**.
+Before distributing EL7 RPMs, test client TLS connections and abruptly closed
+connections (including a peer disconnect during write) to detect unwanted
+SIGPIPE-related process termination. No change is made to EL8/9/10 builds.
+
+Oracle Linux 7 is end-of-life; the package repositories may eventually be
+moved or become inaccessible. Check repository access and GPG signing keys
+before building. An available RPM in an Oracle archive does not guarantee all
+of its transitive dependencies resolve in your selected Mock environment.
+
+### EL8
+
+`mock/mariadb-alma-8-x86_64.cfg` enables the `mariadb-devel:10.3` DNF
+module stream before installing BuildRequires. That stream supplies
+`Judy-devel` in the PowerTools/CRB repo; the pre-existing OQGraph capability
+is not intentionally disabled. Ensure your base Alma+EPEL template has
+PowerTools enabled and its module metadata available.
+
+### EL10
+
+`rpmbuild/SOURCES/0002-CONNECT-support-libxml2-2.12-errors.patch` changes
+`storage/connect/libdoc.cpp` to read const error structures from
+`xmlGetLastError()` and use `xmlResetLastError()`. The spec applies the
+upstream-source patch only when `%{rhel} >= 10` in `%prep`. EL9 is untouched.
+For another 10.4 branch/tag, verify the source patch still applies cleanly.
+
+### Validation before publishing
+
+Run branch-only builds (no publication) for all targets first. On the build
+node, use the exact local Mock override for dependency checks, e.g.:
+
+```sh
+mock -r "mariadb-alma-8-x86_64.cfg" --init
+mock -r "mariadb-oraclelinux-7-x86_64.cfg" --init
+```
+
+For EL7 verify that `devtoolset-11-gcc-c++`, `cmake3`, `Judy-devel` and
+`libzstd-devel` resolve from the configured repos. For EL8 check the
+`mariadb-devel:10.3` stream is available. For EL10 test CONNECT XML parsing,
+XPath and error handling, not just that the code compiles. Compare binary
+packages and plugin lists with the known-good EL9 build. Keep
+`PUSH_TO_SS_MISC=false` until all desired build variants pass.
+
+## CPack warnings and RPM changelog
+
+The spec uses `%patch -P 1` / `%patch -P 2`, which are supported by old and
+modern versions of RPM. The previous `%patch1` / `%patch2` form is deprecated
+(and is rejected by newer RPM versions).
+
+The EL7 build uses `-DCPACK_RPM_DEBUGINFO_PACKAGE=OFF` at CMake configure time
+and passes the same setting to CPack during `%install`. This is intentional:
+this repository uses `CMAKE_BUILD_TYPE=Release`, linker `--strip-all`, and
+`%define debug_package %{nil}`, so it does not produce usable debuginfo. It
+would be misleading to advertise debug-symbol RPMs for these stripped binaries.
+This override is scoped to EL7; other EL build targets are left unchanged.
+If debuginfo RPMs are later required, that needs a separate packaging change
+that preserves debug symbols (e.g. `RelWithDebInfo`), avoids stripping, and
+validates the produced debuginfo RPMs.
+
+Tag builds use the shared `rpm.updateSpec()` helper to set `mariadb_version`,
+`Version`, and prepend a changelog entry. The `release` argument is read from
+the default numeric `Release:` field of the working spec (currently `4`), to
+avoid the helper's unrelated default of `1`. If the spec's `Release` expression
+changes, update the pipeline extraction rather than silently reporting the
+wrong release. Branch-only builds do not rewrite the spec or add a release
+changelog; they remain build-only.
+
+**Important:** MariaDB's outer spec creates an SRPM, while CPack generates
+new RPM specs for binary components. During `%install`, the packaging spec
+extracts the updated `%changelog` section and passes it using
+`CPACK_RPM_CHANGELOG_FILE`. This ensures the same changelog is available to
+CPack-generated binary RPMs as well as the source RPM. When the source spec
+has no changelog entries (for example a branch-only build), the CPack argument
+is omitted to preserve the previous behavior.
+
+Validate after a tag build using `rpm -qp --changelog artifacts/MariaDB-*.rpm`
+(on an individual binary RPM) and `rpm -qp --changelog ...src.rpm`. Confirm the
+entry uses the exact tag version and the effective numeric release (`4` at
+present), plus the expected maintainer from the shared library. Check that
+EL7 no longer warns about missing debuginfo; validate ELF build IDs, installed
+files, package dependencies and real runtime behavior before publishing.
