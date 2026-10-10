@@ -19,7 +19,7 @@ pipeline {
     RPM_PACKAGE_SIGNER_HOST_CREDENTIALS_ID = 'rpm-package-signer-host'
     RPM_PACKAGE_SIGNER_INBOX_CREDENTIALS_ID = 'rpm-package-signer-inbox-target'
     RPM_PACKAGE_SIGNER_PATH_CREDENTIALS_ID = 'rpm-package-signer-path'
-    RPM_PACKAGE_SIGNER_CONFIG_CREDENTIALS_ID = 'packagesigner-mysql.conf'
+    RPM_PACKAGE_SIGNER_CONFIG_CREDENTIALS_ID = 'rpm-package-signer-mysql-config'
     SLACK_WEBHOOK_CREDENTIALS_ID = 'slack-webhook-url'
     SLACK_BOT_TOKEN_CREDENTIALS_ID = 'slack-bot-token'
     SLACK_CHANNEL_ID_CREDENTIALS_ID = 'slack-channel-id'
