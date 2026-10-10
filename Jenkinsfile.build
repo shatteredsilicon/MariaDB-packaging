@@ -77,6 +77,14 @@ pipeline {
           String mockTarget = releasever == '7'
             ? 'oraclelinux-7-x86_64'
             : "alma+epel-${releasever}-x86_64"
+          String mockResultDirectory = "/var/lib/mock/${mockTarget}/result"
+
+          // EL8: enable mariadb-devel:10.3 before installing Judy-devel.
+          // Use a checked-in Mock override and an isolated chroot root name.
+          if (releasever == '8') {
+            mockTarget = "mariadb-alma-8-x86_64"
+            mockResultDirectory = '/var/lib/mock/mariadb-alma-8-x86_64/result'
+          }
 
           org.shatteredsilicon.jenkins.model.BuildTarget target = rpm.resolveTarget(
             release: releasever,
@@ -118,6 +126,7 @@ pipeline {
           env.RELEASEVER = target.release
           env.BASEARCH = target.arch
           env.MOCK_TARGET_NAME = target.mockTarget
+          env.MOCK_RESULT_DIRECTORY = mockResultDirectory
           env.ISA_TARGET = isaTargets[releasever]
           env.PUBLISH_TO_SS_MISC = publishAllowed ? 'true' : 'false'
 
@@ -232,6 +241,7 @@ pipeline {
         script {
           rpm.mockBuild(
             mockTarget: env.MOCK_TARGET_NAME,
+            resultDirectory: env.MOCK_RESULT_DIRECTORY,
             sourceRpm: "work/rpmbuild/SRPMS/MariaDB-${env.PACKAGE_VERSION}-*.src.rpm",
             artifactDirectory: 'artifacts',
             artifactPatterns: [
