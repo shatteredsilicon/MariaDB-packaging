@@ -34,12 +34,21 @@ Patch1: 0001-Allow-building-with-flto-flag.patch
 Patch2: 0002-CONNECT-support-libxml2-2.12-errors.patch
 %endif
 
-BuildRequires: bison boost-devel coreutils checkpolicy binutils cmake make
+BuildRequires: bison boost-devel coreutils checkpolicy binutils make
+%if 0%{?rhel} == 7
+# EL7's stock CMake and GCC are too old. Use the versioned toolchain.
+BuildRequires: cmake3 devtoolset-11-gcc-c++
+%else
+BuildRequires: cmake
+%endif
 BuildRequires: libcurl-devel ncurses-devel systemtap-sdt-devel libevent-devel libaio-devel
 BuildRequires: cracklib-devel glibc-devel zlib-devel xz-devel systemd-devel
 BuildRequires: Judy-devel krb5-devel libxml2-devel unixODBC-devel unixODBC
 BuildRequires: openssl-devel pam-devel readline-devel policycoreutils libzstd-devel
-BuildRequires: snappy-devel lz4-devel gnutls-devel llvm lld clang gperftools-devel
+BuildRequires: snappy-devel lz4-devel gnutls-devel gperftools-devel
+%if 0%{?rhel} != 7
+BuildRequires: llvm lld clang
+%endif
 BuildRequires: procps-ng perl
 
 # EL7 still gets crypt(3) development headers from glibc. EL8+ split them into
@@ -124,7 +133,26 @@ mv -fT wolfssl-%{wolfssl_commit}* mariadb-server-mariadb-%{mariadb_version}/extr
 %build
 mkdir cpack_rpm_build_dir
 cd cpack_rpm_build_dir
+%if 0%{?rhel} == 7
+# Modern GCC and CMake 3 from OL7 Software Collections / developer EPEL.
+# Keep LTO while dropping Clang-specific flags and lld on EL7.
+. /opt/rh/devtoolset-11/enable
+CMAKE_BIN=/usr/bin/cmake3
+CPACK_BIN=/usr/bin/cpack3
+C_COMPILER="$(command -v gcc)"
+CXX_COMPILER="$(command -v g++)"
+LINKER="$(command -v ld)"
+AR="$(command -v gcc-ar)"
+export CPPFLAGS='-ffunction-sections -fdata-sections -flto'
+%else
+CMAKE_BIN=/usr/bin/cmake
+CPACK_BIN=/usr/bin/cpack
+C_COMPILER=/usr/bin/clang
+CXX_COMPILER=/usr/bin/clang++
+LINKER=/usr/bin/lld
+AR=/usr/bin/llvm-ar
 export CPPFLAGS='-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all -Wno-unused-command-line-argument -fuse-ld=lld -fvectorize -fslp-vectorize -fwhole-program-vtables -flto'
+%endif
 export LDFLAGS='-Wl,--gc-sections -Wl,--strip-all'
 
 %ifarch x86_64
@@ -141,15 +169,15 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
 %endif
 %endif
 
-'/usr/bin/cmake'  -DRPM=rh%{suffix:%dist} \
+"$CMAKE_BIN"  -DRPM=rh%{suffix:%dist} \
                   -DLZ4_LIBS=%{_libdir}/liblz4.so \
                   -DWITH_INNODB_LZ4=ON \
                   -DWITH_ROCKSDB_LZ4=ON \
                   -DCMAKE_BUILD_TYPE=Release \
-                  -DCMAKE_C_COMPILER=/usr/bin/clang \
-                  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
-                  -DCMAKE_LINKER=/usr/bin/lld \
-                  -DCMAKE_AR=/usr/bin/llvm-ar \
+                  -DCMAKE_C_COMPILER="$C_COMPILER" \
+                  -DCMAKE_CXX_COMPILER="$CXX_COMPILER" \
+                  -DCMAKE_LINKER="$LINKER" \
+                  -DCMAKE_AR="$AR" \
                   -DCMAKE_C_FLAGS="$CPPFLAGS" \
                   -DCMAKE_CXX_FLAGS="$CPPFLAGS" \
                   -DCMAKE_EXE_LINKER_FLAGS="-ltcmalloc_minimal $LDFLAGS" \
@@ -169,7 +197,12 @@ make %{?_smp_mflags}
 %install
 
 cd cpack_rpm_build_dir
-cpack -D CPACK_RPM_PACKAGE_VERSION=%{version} -D CPACK_RPM_PACKAGE_RELEASE=%{release} -G RPM
+%if 0%{?rhel} == 7
+CPACK_BIN=/usr/bin/cpack3
+%else
+CPACK_BIN=/usr/bin/cpack
+%endif
+"$CPACK_BIN" -D CPACK_RPM_PACKAGE_VERSION=%{version} -D CPACK_RPM_PACKAGE_RELEASE=%{release} -G RPM
 mv *.rpm %_rpmdir
 
 %clean

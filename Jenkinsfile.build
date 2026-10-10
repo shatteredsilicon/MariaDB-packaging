@@ -84,6 +84,10 @@ pipeline {
           if (releasever == '8') {
             mockTarget = "mariadb-alma-8-x86_64"
             mockResultDirectory = '/var/lib/mock/mariadb-alma-8-x86_64/result'
+          } else if (releasever == '7') {
+            // EL7 requires Oracle developer EPEL and Software Collections.
+            mockTarget = "mariadb-oraclelinux-7-x86_64"
+            mockResultDirectory = '/var/lib/mock/mariadb-oraclelinux-7-x86_64/result'
           }
 
           org.shatteredsilicon.jenkins.model.BuildTarget target = rpm.resolveTarget(
