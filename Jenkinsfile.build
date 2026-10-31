@@ -279,10 +279,22 @@ pipeline {
             ],
             requiredArtifactPatterns: [
               "MariaDB-server-${env.PACKAGE_VERSION}-*.${env.BASEARCH}.rpm",
+              "MariaDB-server-debuginfo-${env.PACKAGE_VERSION}-*.${env.BASEARCH}.rpm",
               "MariaDB-${env.PACKAGE_VERSION}-*.src.rpm"
             ]
           )
         }
+      }
+    }
+
+    stage('Validate debuginfo RPMs') {
+      steps {
+        sh(
+          script: '''
+            set -euo pipefail
+            bash scripts/verify-debuginfo.sh artifacts "$PACKAGE_VERSION" "$BASEARCH"
+          '''.stripIndent().trim()
+        )
       }
     }
 

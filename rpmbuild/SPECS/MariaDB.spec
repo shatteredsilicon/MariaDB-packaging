@@ -1,4 +1,5 @@
-# Restore old style debuginfo creation for rpm >= 4.14.
+# The outer spec only produces the SRPM. Binary RPMs and their debuginfo
+# packages are built by CPack, which has independent generated specs.
 %undefine _debugsource_packages
 %undefine _debuginfo_subpackages
 
@@ -71,6 +72,9 @@ BuildRequires: java-21-openjdk java-21-openjdk-headless
 BuildRequires: java-1.8.0-openjdk java-1.8.0-openjdk-headless
 %endif
 
+# This outer spec only produces the source RPM; CPack generates binary RPMs
+# using its own specs. Suppress the outer spec's empty automatic debuginfo RPM.
+# CPack debuginfo generation is enabled explicitly below.
 %define debug_package %{nil}
 
 %define _rpmdir %_topdir/RPMS
@@ -151,9 +155,10 @@ C_COMPILER=/usr/bin/clang
 CXX_COMPILER=/usr/bin/clang++
 LINKER=/usr/bin/lld
 AR=/usr/bin/llvm-ar
-export CPPFLAGS='-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all -Wno-unused-command-line-argument -fuse-ld=lld -fvectorize -fslp-vectorize -fwhole-program-vtables -flto'
+export CPPFLAGS='-ffunction-sections -fdata-sections -Wl,--gc-sections -Wno-unused-command-line-argument -fuse-ld=lld -fvectorize -fslp-vectorize -fwhole-program-vtables -flto'
 %endif
-export LDFLAGS='-Wl,--gc-sections -Wl,--strip-all'
+# Never strip the link output: CPack needs DWARF sections to extract debuginfo.
+export LDFLAGS='-Wl,--gc-sections'
 
 %ifarch x86_64
 # Keep the binary ISA baseline aligned with the selected EL generation.
@@ -180,7 +185,7 @@ export CPPFLAGS="${CPPFLAGS} -DGNUTLS_NO_SIGNAL=0"
                   -DLZ4_LIBS=%{_libdir}/liblz4.so \
                   -DWITH_INNODB_LZ4=ON \
                   -DWITH_ROCKSDB_LZ4=ON \
-                  -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
                   -DCMAKE_C_COMPILER="$C_COMPILER" \
                   -DCMAKE_CXX_COMPILER="$CXX_COMPILER" \
                   -DCMAKE_LINKER="$LINKER" \
@@ -192,7 +197,8 @@ export CPPFLAGS="${CPPFLAGS} -DGNUTLS_NO_SIGNAL=0"
 %if 0%{?rhel} == 7
                   -DENABLE_DTRACE=OFF \
 %endif
-                  -DCPACK_RPM_DEBUGINFO_PACKAGE=OFF \
+                  -DCPACK_RPM_DEBUGINFO_PACKAGE=ON \
+                  -DCPACK_STRIP_FILES=OFF \
                   -DWITH_EMBEDDED_SERVER=no \
                   -DWITH_SAFEMALLOC=OFF \
                   -DWITH_SSL=bundled \
@@ -232,15 +238,14 @@ awk '
     in_changelog { print }
 ' "%{_specdir}/MariaDB.spec" > "$CPACK_CHANGELOG_FILE"
 
-set -- -D CPACK_RPM_PACKAGE_VERSION=%{version} -D CPACK_RPM_PACKAGE_RELEASE=%{release} -G RPM
+# CPack, not the outer rpmbuild spec, owns MariaDB binary RPMs. Override
+# both variables here as a guard against changes in upstream CPack defaults.
+set -- -D CPACK_RPM_PACKAGE_VERSION=%{version} -D CPACK_RPM_PACKAGE_RELEASE=%{release} \
+       -D CPACK_RPM_DEBUGINFO_PACKAGE=ON -D CPACK_STRIP_FILES=OFF -G RPM
 if grep -q '^\* ' "$CPACK_CHANGELOG_FILE"; then
     set -- -D "CPACK_RPM_CHANGELOG_FILE=$CPACK_CHANGELOG_FILE" "$@"
 fi
-%if 0%{?rhel} == 7
-# MariaDB enables debuginfo in CPack by default, but this legacy RPM build
-# strips debug symbols and explicitly disables RPM debuginfo subpackages.
-set -- -D CPACK_RPM_DEBUGINFO_PACKAGE=OFF "$@"
-%endif
+
 "$CPACK_BIN" "$@"
 mv *.rpm %_rpmdir
 

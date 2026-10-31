@@ -198,15 +198,11 @@ The spec uses `%patch -P 1` / `%patch -P 2`, which are supported by old and
 modern versions of RPM. The previous `%patch1` / `%patch2` form is deprecated
 (and is rejected by newer RPM versions).
 
-The EL7 build uses `-DCPACK_RPM_DEBUGINFO_PACKAGE=OFF` at CMake configure time
-and passes the same setting to CPack during `%install`. This is intentional:
-this repository uses `CMAKE_BUILD_TYPE=Release`, linker `--strip-all`, and
-`%define debug_package %{nil}`, so it does not produce usable debuginfo. It
-would be misleading to advertise debug-symbol RPMs for these stripped binaries.
-This override is scoped to EL7; other EL build targets are left unchanged.
-If debuginfo RPMs are later required, that needs a separate packaging change
-that preserves debug symbols (e.g. `RelWithDebInfo`), avoids stripping, and
-validates the produced debuginfo RPMs.
+Previously, the spec configured CPack debuginfo `OFF`, built in `Release`
+mode, and used linker `--strip-all`, preventing production of usable debuginfo.
+The debuginfo packaging changes below enable CPack debug packages and remove
+stripping on all supported EL targets. The outer `%define debug_package %{nil}`
+remains because the outer spec is only used to create the source RPM.
 
 Tag builds use the shared `rpm.updateSpec()` helper to set `mariadb_version`,
 `Version`, and prepend a changelog entry. The `release` argument is read from
@@ -230,3 +226,65 @@ entry uses the exact tag version and the effective numeric release (`4` at
 present), plus the expected maintainer from the shared library. Check that
 EL7 no longer warns about missing debuginfo; validate ELF build IDs, installed
 files, package dependencies and real runtime behavior before publishing.
+
+## MariaDB debuginfo RPMs
+
+The MariaDB 10.4 CPack RPM generator creates **binary** RPMs independently of
+`rpmbuild/SPECS/MariaDB.spec`. Disabling the outer spec's empty automatic
+`%debug_package` is intentional; it does not control CPack's generated specs.
+
+All builds now use `CMAKE_BUILD_TYPE=RelWithDebInfo`, remove linker
+`--strip-all`, and explicitly enable `CPACK_RPM_DEBUGINFO_PACKAGE=ON` with
+`CPACK_STRIP_FILES=OFF` at both configure and packaging time. The existing
+compilers, CPU ISA targets, LTO flags and `-Wl,--gc-sections` remain selected
+by EL generation. `RelWithDebInfo` may change optimization defaults compared to
+`Release`, so run normal workload and throughput regression tests as part of
+rollout. Package creation takes more disk space and time.
+
+Jenkins requires `MariaDB-server-debuginfo-<version>-<release>.<arch>.rpm` from
+Mock and checks that its RPM header identifies the package and it contains
+ELF `.debug` files below `/usr/lib/debug/`. The build fails before publishing
+if the server debuginfo is missing or empty. This is a basic structural check,
+**not** a substitute for validating build IDs and real GDB backtraces in the
+production target environment.
+
+Publishing remains tag-only and controlled by `PUSH_TO_SS_MISC`. The shared
+library collects the additional RPMs using the existing `MariaDB*` artifact
+pattern; the separate `github-releasehook/packagesigner` change classifies
+packages by RPM `NAME` suffix, not by filename substring:
+
+- `MariaDB-server-*.rpm` and other runtime binary RPMs => `RPMS/<arch>`
+- `MariaDB-*.src.rpm` => `SRPMS`
+- `MariaDB-*-debuginfo-*.rpm` and `MariaDB-*-debugsource-*.rpm` => `debuginfo`
+
+Add the `DEBUGINFO=` destination in the installed `packagesigner-mysql.conf`
+credential. This key is optional for old configurations with no debug packages,
+but the new signer deliberately returns failure if it receives debug packages
+and the destination is not configured. The debuginfo directory gets its own
+`createrepo` metadata. Update the signer on the package-signing host **before**
+enabling this Jenkins change in production.
+
+### First publication and troubleshooting
+
+1. Run a branch build with `PUSH_TO_SS_MISC=false` on EL10, then other target ELs.
+   Confirm at least the server debuginfo RPM passes the Jenkins validation.
+2. Inspect its contents with `rpm -qpl MariaDB-server-debuginfo-*.rpm`.
+3. In an isolated EL matching the build, install a freshly built server RPM
+   and the *same-build* debuginfo RPM, then verify a real `gdb` backtrace
+   resolves symbols and source lines. Verify matching ELF build IDs on the
+   binary and `.debug` files where present.
+4. Compare normal server tests and workload performance against the old
+   `Release` binaries on EL7/8/9/10 as applicable.
+5. Install the corresponding `packagesigner` patch and `DEBUGINFO` config on
+   the signing host; then publish a new, unique version/release tag build.
+6. Check `repodata` under the new `debuginfo` directory, plus unchanged
+   `RPMS/<arch>` and `SRPMS` paths. Confirm all packages are signed and
+   `dnf --enablerepo=<your-debuginfo-repo> ...` can install them.
+
+**Historical releases:** The old `Release` build stripped symbols using
+`--strip-all`. Recompiling from the same tag using `RelWithDebInfo` changes
+ELF build IDs and potentially runtime code. It cannot reliably supply
+matching debuginfo for RPMs already installed from those old builds. Do not
+overwrite historical release RPMs with a debug-enabled rebuild under the
+same version/release. Preserve matching binary and debuginfo RPMs together for
+every future release.
