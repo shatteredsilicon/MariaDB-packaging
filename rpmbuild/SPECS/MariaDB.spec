@@ -3,15 +3,15 @@
 %undefine _debugsource_packages
 %undefine _debuginfo_subpackages
 
-%global libmariadb_commit 51b2a62
+%global libmariadb_commit 1d99a97e
 %global wolfssl_commit 8970ff4
-%global mariadb_version 10.4.34.1
+%global mariadb_version 10.4.41
 
 # -*- rpm-spec -*-
 Summary:        MariaDB: a very fast and robust SQL database server
 Name:           MariaDB
 %if "0%{?_version}" == "0"
-Version:        10.4.34.1
+Version:        10.4.41
 %else
 Version:        %{_version}
 %endif
@@ -26,7 +26,7 @@ Vendor:         MariaDB Foundation
 BuildRoot:      %_topdir/mariadb-%{version}
 
 Source0:  mariadb-server-mariadb-%{mariadb_version}.tar.gz
-Source1:  https://github.com/MariaDB/mariadb-connector-c/archive/%{libmariadb_commit}/mariadb-connector-c-%{libmariadb_commit}.tar.gz
+Source1:  https://github.com/shatteredsilicon/mariadb-connector-c/archive/%{libmariadb_commit}/mariadb-connector-c-%{libmariadb_commit}.tar.gz
 Source2:  https://github.com/wolfSSL/wolfssl/archive/%{wolfssl_commit}/wolfssl-%{wolfssl_commit}.tar.gz
 
 Patch1: 0001-Allow-building-with-flto-flag.patch
