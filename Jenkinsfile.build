@@ -11,6 +11,7 @@ pipeline {
     string(name: 'UPSTREAM_BRANCH', defaultValue: '', description: 'Branch in shatteredsilicon/mariadb-server. Used only when UPSTREAM_TAG is empty, e.g. 10.4.35')
     string(name: 'UPSTREAM_TAG', defaultValue: '', description: 'Tag in shatteredsilicon/mariadb-server. Takes precedence over UPSTREAM_BRANCH, e.g. mariadb-10.4.34')
     choice(name: 'EPEL', choices: ['10', '9', '8', '7'], description: 'Target EL/EPEL release')
+    string(name: 'BUILD_RELEASE', defaultValue: '4', description: 'Numeric RPM release for source and binary RPMs (default: 4)')
     booleanParam(name: 'PUSH_TO_SS_MISC', defaultValue: false, description: 'Publish tag builds to SS misc through the package signer. Branch-only builds are never published.')
     string(name: 'THREAD_TS', defaultValue: '', description: 'Slack parent thread timestamp for watcher-triggered notifications')
   }
@@ -40,6 +41,10 @@ pipeline {
         script {
           String upstreamBranch = (params.UPSTREAM_BRANCH ?: '').trim()
           String upstreamTag = (params.UPSTREAM_TAG ?: '').trim()
+          String buildRelease = (params.BUILD_RELEASE ?: '').trim()
+          if (!(buildRelease ==~ /^[1-9][0-9]{0,8}$/)) {
+            error('BUILD_RELEASE must be a positive integer of at most 9 digits.')
+          }
 
           if (!upstreamBranch && !upstreamTag) {
             error('At least one of UPSTREAM_BRANCH or UPSTREAM_TAG must be provided.')
@@ -127,6 +132,7 @@ pipeline {
           env.SOURCE_KIND = sourceKind
           env.SOURCE_REF = sourceRef
           env.PACKAGE_VERSION = packageVersion
+          env.BUILD_RELEASE = buildRelease
           env.RELEASEVER = target.release
           env.BASEARCH = target.arch
           env.MOCK_TARGET_NAME = target.mockTarget
@@ -141,6 +147,7 @@ pipeline {
 
         echo "Using MariaDB source: ${env.SOURCE_KIND} ${env.SOURCE_REF}"
         echo "Using RPM version: ${env.PACKAGE_VERSION}"
+        echo "Using RPM release: ${env.BUILD_RELEASE}"
         echo "Using EPEL release: ${env.RELEASEVER}"
         echo "Using architecture: ${env.BASEARCH}"
         echo "Using CPU ISA target: ${env.ISA_TARGET}"
@@ -180,6 +187,25 @@ pipeline {
           script: '''
             set -euo pipefail
             cp -a rpmbuild work/rpmbuild
+
+            # Persist the selected release in the SRPM spec so Mock and CPack
+            # use it too; a --define passed only to rpmbuild -bs is not enough.
+            spec=work/rpmbuild/SPECS/MariaDB.spec
+            awk -v release="$BUILD_RELEASE" '
+              /^Release:[[:space:]]*[1-9][0-9]*%[{][?]dist[}][[:space:]]*$/ {
+                print "Release:        " release "%{?dist}"
+                count++
+                next
+              }
+              { print }
+              END {
+                if (count != 1) {
+                  print "Expected exactly one numeric default Release in MariaDB.spec" > "/dev/stderr"
+                  exit 1
+                }
+              }
+            ' "$spec" > "$spec.tmp"
+            mv "$spec.tmp" "$spec"
           '''.stripIndent().trim()
         )
       }
@@ -191,33 +217,11 @@ pipeline {
       }
       steps {
         script {
-          // The helper defaults to changelog Release 1, but the uploaded spec
-          // currently builds Release 4. Read its default numeric value rather
-          // than writing a misleading changelog entry for the wrong release.
-          String rpmRelease = sh(
-            script: '''
-              set -euo pipefail
-              awk '
-                /^Release:[[:space:]]*[1-9][0-9]*%[{][?]dist[}][[:space:]]*$/ {
-                  release = $2
-                  sub(/%[{][?]dist[}]$/, "", release)
-                  print release
-                  exit
-                }
-              ' work/rpmbuild/SPECS/MariaDB.spec
-            '''.stripIndent().trim(),
-            returnStdout: true
-          ).toString().trim()
-
-          if (!(rpmRelease ==~ /^[1-9][0-9]*$/)) {
-            error("Cannot determine numeric default Release from MariaDB.spec: '${rpmRelease}'")
-          }
-
           rpm.updateSpec(
             specFile: 'work/rpmbuild/SPECS/MariaDB.spec',
             version: env.PACKAGE_VERSION,
             versionMacro: 'mariadb_version',
-            release: rpmRelease.toInteger(),
+            release: env.BUILD_RELEASE.toInteger(),
             preserveVersionField: false,
             updateChangelog: true
           )
@@ -316,6 +320,12 @@ pipeline {
             find artifacts -maxdepth 1 -type f -name '*.rpm' -print0 \
               | sort -z \
               | while IFS= read -r -d '' package; do
+                  actual_release=$(rpm -qp --qf '%{RELEASE}' "$package")
+                  expected_release="$BUILD_RELEASE.el$RELEASEVER"
+                  if [ "$actual_release" != "$expected_release" ]; then
+                    echo "Unexpected RPM release in $package: $actual_release (expected $expected_release)" >&2
+                    exit 1
+                  fi
                   rpm -qp --qf '  %{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' "$package"
                 done
 
