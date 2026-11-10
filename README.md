@@ -31,6 +31,8 @@ mariadb-packaging/
   pipeline extracts `10.4.34` from the tag and updates both `mariadb_version` and
   `Version` in the working copy of `MariaDB.spec`.
 - `EPEL`: target release `7`, `8`, `9`, or `10`. The pipeline builds x86_64 only.
+- `BUILD_RELEASE`: positive numeric RPM release, default `4`. Applies to source
+  and binary RPMs for both tag and branch builds.
 - `PUSH_TO_SS_MISC`: disabled by default. When enabled for a tag build, both
   source and binary RPMs are sent through the shared-library package-signer
   workflow. When disabled, nothing is pushed.
@@ -204,13 +206,13 @@ The debuginfo packaging changes below enable CPack debug packages and remove
 stripping on all supported EL targets. The outer `%define debug_package %{nil}`
 remains because the outer spec is only used to create the source RPM.
 
+Jenkins replaces the default numeric `Release:` in the working spec with
+`BUILD_RELEASE` before creating the SRPM, so Mock and CPack use the same value.
 Tag builds use the shared `rpm.updateSpec()` helper to set `mariadb_version`,
-`Version`, and prepend a changelog entry. The `release` argument is read from
-the default numeric `Release:` field of the working spec (currently `4`), to
-avoid the helper's unrelated default of `1`. If the spec's `Release` expression
-changes, update the pipeline extraction rather than silently reporting the
-wrong release. Branch-only builds do not rewrite the spec or add a release
-changelog; they remain build-only.
+`Version`, and prepend a changelog entry with that release (instead of the
+helper's default of `1`). If the spec's `Release` expression changes, update
+the working-spec replacement to match. Branch-only builds do not rewrite the
+version or add a changelog entry; they remain build-only.
 
 **Important:** MariaDB's outer spec creates an SRPM, while CPack generates
 new RPM specs for binary components. During `%install`, the packaging spec
@@ -222,8 +224,8 @@ is omitted to preserve the previous behavior.
 
 Validate after a tag build using `rpm -qp --changelog artifacts/MariaDB-*.rpm`
 (on an individual binary RPM) and `rpm -qp --changelog ...src.rpm`. Confirm the
-entry uses the exact tag version and the effective numeric release (`4` at
-present), plus the expected maintainer from the shared library. Check that
+entry uses the exact tag version and selected `BUILD_RELEASE` (default `4`),
+plus the expected maintainer from the shared library. Check that
 EL7 no longer warns about missing debuginfo; validate ELF build IDs, installed
 files, package dependencies and real runtime behavior before publishing.
 
