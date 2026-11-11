@@ -174,13 +174,9 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
 %endif
 %endif
 
-# EL7 GnuTLS 3.3 lacks GNUTLS_NO_SIGNAL (introduced in GnuTLS 3.4.2).
-# Treat the unsupported flag as zero for Connector/C; this restores compilation
-# but does not provide the newer library's SIGPIPE suppression semantics.
-%if 0%{?rhel} == 7
-export CPPFLAGS="${CPPFLAGS} -DGNUTLS_NO_SIGNAL=0"
-%endif
-
+# EL7's GnuTLS 3.3 cannot satisfy Connector/C's newer GnuTLS requirement.
+# Use system OpenSSL for both the server and Connector/C on EL7.
+# Other EL targets retain the bundled wolfSSL configuration.
 "$CMAKE_BIN"  -DRPM=rh%{suffix:%dist} \
                   -DLZ4_LIBS=%{_libdir}/liblz4.so \
                   -DWITH_INNODB_LZ4=ON \
@@ -201,7 +197,11 @@ export CPPFLAGS="${CPPFLAGS} -DGNUTLS_NO_SIGNAL=0"
                   -DCPACK_STRIP_FILES=OFF \
                   -DWITH_EMBEDDED_SERVER=no \
                   -DWITH_SAFEMALLOC=OFF \
+%if 0%{?rhel} == 7
+                  -DWITH_SSL=system \
+%else
                   -DWITH_SSL=bundled \
+%endif
                   -DWITH_JEMALLOC=no \
                   -DWITH_WSREP=no \
                   -DWITH_UNIT_TESTS=no \
