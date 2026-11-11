@@ -147,14 +147,11 @@ unchanged. Verify the resulting EL7 binaries and database workloads before
 publishing them. If EL7 SystemTap instrumentation is a firm requirement,
 investigate a separate toolchain or targeted source/build-system fix instead.
 
-EL7's GnuTLS 3.3 predates `GNUTLS_NO_SIGNAL` (introduced in GnuTLS 3.4.2).
-The spec adds `-DGNUTLS_NO_SIGNAL=0` to `CPPFLAGS` in `%build` **only for EL7**.
-It is propagated through the existing `CMAKE_C_FLAGS` setting to Connector/C's
-`libmariadb/secure/gnutls.c`, avoiding a separate source patch. This compiles
-without the unsupported flag, but **does not reproduce its SIGPIPE suppression**.
-Before distributing EL7 RPMs, test client TLS connections and abruptly closed
-connections (including a peer disconnect during write) to detect unwanted
-SIGPIPE-related process termination. No change is made to EL8/9/10 builds.
+System OpenSSL is now selected on EL7/8/9/10. This avoids Connector/C 3.1.30's
+GnuTLS >= 3.4.2 requirement (EL7 ships GnuTLS 3.3.x), and eliminates the old
+`-DGNUTLS_NO_SIGNAL=0` workaround. The `bundled` comparison build uses wolfSSL
+in the server and GnuTLS in Connector/C. It is **not buildable on stock EL7**
+with Connector/C 3.1.30 without a supported, maintained newer GnuTLS dependency.
 
 Oracle Linux 7 is end-of-life; the package repositories may eventually be
 moved or become inaccessible. Check repository access and GPG signing keys
@@ -176,6 +173,115 @@ PowerTools enabled and its module metadata available.
 `xmlGetLastError()` and use `xmlResetLastError()`. The spec applies the
 upstream-source patch only when `%{rhel} >= 10` in `%prep`. EL9 is untouched.
 For another 10.4 branch/tag, verify the source patch still applies cleanly.
+
+### Focused SSL/TLS MTR regression test (local, opt-in)
+
+The RPM build defaults to `-DWITH_SSL=system` on EL7/8/9/10. To compare with
+`bundled`, invoke Mock with `--define 'mariadb_ssl_backend bundled'`.
+additionally enables a focused `%check` in the **same** Mock buildroot: `main.ssl*`,
+`main.tls_*`, and a small `--ssl`-enabled client smoke (`main.1st` and `main.connect`).
+Regular Jenkins builds have MTR **off**; no Jenkins changes are required. MTR comes
+from the matching compiled source tree, not a separately installed RPM. A successful
+build/MTR run is not proof of compatibility with every production TLS configuration;
+review skipped cases and test your deployed certificates, protocol policy and clients too.
+
+Run the commands in the same local Bash session, from the repository root.
+The workflow uses a temporary copy, so it does not modify your working spec.
+Set `VERSION` to the version under test; check that the copied spec's
+`libmariadb_commit` already references your Connector/C 3.1.30 commit before
+preparing sources.
+
+**Step 1: Prepare a matching SRPM source tree.** The fork must contain the
+requested tag. This example uses MariaDB 10.4.40.
+
+```bash
+cd /path/to/mariadb-packaging
+set -euo pipefail
+export VERSION=10.4.40
+export TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mariadb-ssl-mtr.XXXXXX")"
+cp -a rpmbuild "$TEST_ROOT/rpmbuild"
+SPEC="$TEST_ROOT/rpmbuild/SPECS/MariaDB.spec"
+sed -i -E \
+  -e "s/^(%global mariadb_version ).*/\\1${VERSION}/" \
+  -e "s/^(Version:[[:space:]]*)[0-9]+([.][0-9]+)+$/\\1${VERSION}/" \
+  "$SPEC"
+grep -E '^%global (mariadb_version|libmariadb_commit) ' "$SPEC"
+# Verify that libmariadb_commit refers to Connector/C 3.1.30.
+"$TEST_ROOT/rpmbuild/SOURCES/prep-mariadb.sh" tag "mariadb-$VERSION" "$VERSION"
+```
+
+**Step 2: Create one EL-specific SRPM for each target.** This reproduces the
+`dist`/`rhel` definitions used by Jenkins. Ensure `rpmbuild` and `mock` are
+installed locally and the base Mock templates are available.
+
+```bash
+mkdir -p "$TEST_ROOT/rpmbuild"/{BUILD,BUILDROOT,RPMS,SRPMS}
+for EL in 7 8 9 10; do
+  rpmbuild -bs \
+    --define "_topdir $TEST_ROOT/rpmbuild" \
+    --define "dist .el${EL}" \
+    --define "rhel ${EL}" \
+    "$SPEC"
+done
+ls -lh "$TEST_ROOT/rpmbuild/SRPMS/"
+```
+
+**Step 3: Build and run focused MTR checks inside Mock.** The EL7 `bundled`
+case is intentionally omitted: its GnuTLS 3.3.x is too old for Connector/C
+3.1.30. A failing build or MTR command stops the loop and must be investigated;
+**do not** treat the absence of an EL7 `bundled` run as a passing regression.
+
+```bash
+for EL in 7 8 9 10; do
+  case "$EL" in
+    7) MOCK_CONFIG="$PWD/mock/mariadb-oraclelinux-7-x86_64.cfg" ;;
+    8) MOCK_CONFIG="$PWD/mock/mariadb-alma-8-x86_64.cfg" ;;
+    9) MOCK_CONFIG='alma+epel-9-x86_64' ;;
+    10) MOCK_CONFIG='alma+epel-10-x86_64' ;;
+  esac
+  SRPM=$(find "$TEST_ROOT/rpmbuild/SRPMS" -maxdepth 1 -type f \
+    -name "MariaDB-${VERSION}-*.el${EL}.src.rpm" -print -quit)
+  test -n "$SRPM"
+  for BACKEND in system bundled; do
+    if [ "$EL" = 7 ] && [ "$BACKEND" = bundled ]; then continue; fi
+    OUT="$TEST_ROOT/results/el${EL}-${BACKEND}"
+    mkdir -p "$OUT"
+    mock -r "$MOCK_CONFIG" --rebuild "$SRPM" \
+      --define "mariadb_ssl_backend $BACKEND" \
+      --resultdir "$OUT"
+  done
+done
+```
+
+**Step 4: Review the test summary and binary dependencies.** Check the
+`build.log` for the three `SSL MTR:` markers, real PASS/FAIL/SKIP counts, and
+whether SSL cases were skipped. Inspect the runtime requirements of all
+binary RPMs: `system` should use OpenSSL, while `bundled` normally uses
+GnuTLS for Connector/C (the server uses wolfSSL).
+The server also changes TLS backend. Retain the per-target Mock logs to compare
+backends and investigate failures; do not publish an RPM merely because it was
+built successfully.
+
+```bash
+for OUT in "$TEST_ROOT"/results/el*-*; do
+  echo "=== $OUT ==="
+  grep -E 'SSL MTR:|pass|fail|skip|tests? (were|run)' \
+    "$OUT/build.log" | tail -n 60 || true
+  for RPM in "$OUT"/MariaDB-*.x86_64.rpm; do
+    test -f "$RPM"
+    TLS_DEPS=$(rpm -qp --requires "$RPM" | grep -E 'lib(ssl|crypto|gnutls)' || true)
+    if [ -n "$TLS_DEPS" ]; then
+      echo "$(basename "$RPM")"
+      echo "$TLS_DEPS"
+    fi
+  done
+done
+```
+
+MTR references:
+[MariaDB test-run options](https://mariadb.com/docs/server/clients-and-utilities/testing-tools/mariadb-test/mariadb-test-run-pl-options),
+[MariaDB build/test instructions](https://mariadb.org/get-involved/getting-started-for-developers/get-code-build-test/),
+[Mock CLI options](https://linux.die.net/man/1/mock).
 
 ### Validation before publishing
 

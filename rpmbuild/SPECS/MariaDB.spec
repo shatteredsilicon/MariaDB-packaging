@@ -1,5 +1,8 @@
 # The outer spec only produces the SRPM. Binary RPMs and their debuginfo
 # packages are built by CPack, which has independent generated specs.
+# System OpenSSL is the production default. Override only for comparison builds
+# (e.g. mock --define 'mariadb_ssl_backend bundled').
+%{!?mariadb_ssl_backend:%global mariadb_ssl_backend system}
 %undefine _debugsource_packages
 %undefine _debuginfo_subpackages
 
@@ -174,9 +177,9 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
 %endif
 %endif
 
-# EL7's GnuTLS 3.3 cannot satisfy Connector/C's newer GnuTLS requirement.
-# Use system OpenSSL for both the server and Connector/C on EL7.
-# Other EL targets retain the bundled wolfSSL configuration.
+# System OpenSSL avoids Connector/C's GnuTLS dependency on EL7 and keeps
+# server and Connector/C on the same TLS backend across EL7/8/9/10.
+# Use mariadb_ssl_backend=bundled only for comparative builds (EL8+).
 "$CMAKE_BIN"  -DRPM=rh%{suffix:%dist} \
                   -DLZ4_LIBS=%{_libdir}/liblz4.so \
                   -DWITH_INNODB_LZ4=ON \
@@ -197,11 +200,7 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
                   -DCPACK_STRIP_FILES=OFF \
                   -DWITH_EMBEDDED_SERVER=no \
                   -DWITH_SAFEMALLOC=OFF \
-%if 0%{?rhel} == 7
-                  -DWITH_SSL=system \
-%else
-                  -DWITH_SSL=bundled \
-%endif
+                  -DWITH_SSL=%{mariadb_ssl_backend} \
                   -DWITH_JEMALLOC=no \
                   -DWITH_WSREP=no \
                   -DWITH_UNIT_TESTS=no \
@@ -209,6 +208,11 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
                   -DPLUGIN_SPIDER=NO \
                   -DPLUGIN_SPHINX=NO \
                   -DCPACK_PACKAGING_INSTALL_PREFIX=/ ../mariadb-server-mariadb-%{mariadb_version}
+# Make the requested backend explicit and fail on unexpected CMake behavior.
+grep -Eq '^WITH_SSL:[^=]+=%{mariadb_ssl_backend}$' CMakeCache.txt || {
+    echo 'ERROR: WITH_SSL does not match mariadb_ssl_backend.' >&2
+    exit 1
+}
 %if 0%{?rhel} == 7
 # GCC 11 LTO can leave unresolved SDT probe semaphore relocations in MyISAM
 # tools. This packaging build deliberately omits DTrace/SystemTap on EL7.
@@ -248,6 +252,18 @@ fi
 
 "$CPACK_BIN" "$@"
 mv *.rpm %_rpmdir
+
+# TLS regression checks run in Mock as the unprivileged build user.
+# They test the binaries created by this build, not system-installed MariaDB.
+%check
+cd cpack_rpm_build_dir
+[ -x ./mysql-test/mtr ] || { echo 'ERROR: MTR runner is missing.' >&2; exit 1; }
+echo 'SSL MTR: backend=%{mariadb_ssl_backend}, main.ssl*'
+./mysql-test/mtr --suite=main --do-test=ssl --parallel=2 --force
+echo 'SSL MTR: backend=%{mariadb_ssl_backend}, main.tls_*'
+./mysql-test/mtr --suite=main --do-test=tls_ --parallel=2 --force
+echo 'SSL MTR: backend=%{mariadb_ssl_backend}, TLS-enabled client smoke'
+./mysql-test/mtr --ssl --parallel=2 main.1st main.connect
 
 %clean
 
