@@ -1,8 +1,13 @@
 # The outer spec only produces the SRPM. Binary RPMs and their debuginfo
 # packages are built by CPack, which has independent generated specs.
-# System OpenSSL is the production default. Override only for comparison builds
-# (e.g. mock --define 'mariadb_ssl_backend bundled').
+# EL7/EL8 default to system OpenSSL for both server and Connector/C.
+# EL9/EL10 use bundled wolfSSL for the server and GnuTLS for Connector/C.
+# Explicit overrides remain available for testing.
+%if 0%{?rhel} < 9
 %{!?mariadb_ssl_backend:%global mariadb_ssl_backend system}
+%else
+%{!?mariadb_ssl_backend:%global mariadb_ssl_backend bundled}
+%endif
 %undefine _debugsource_packages
 %undefine _debuginfo_subpackages
 
@@ -177,9 +182,9 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
 %endif
 %endif
 
-# System OpenSSL avoids Connector/C's GnuTLS dependency on EL7 and keeps
-# server and Connector/C on the same TLS backend across EL7/8/9/10.
-# Use mariadb_ssl_backend=bundled only for comparative builds (EL8+).
+# EL7/EL8: system OpenSSL for both the server and Connector/C.
+# EL9/EL10: bundled wolfSSL for the server and GnuTLS for Connector/C,
+# avoiding MariaDB 10.4's incompatibility with system OpenSSL 3.x.
 "$CMAKE_BIN"  -DRPM=rh%{suffix:%dist} \
                   -DLZ4_LIBS=%{_libdir}/liblz4.so \
                   -DWITH_INNODB_LZ4=ON \

@@ -147,11 +147,11 @@ unchanged. Verify the resulting EL7 binaries and database workloads before
 publishing them. If EL7 SystemTap instrumentation is a firm requirement,
 investigate a separate toolchain or targeted source/build-system fix instead.
 
-System OpenSSL is now selected on EL7/8/9/10. This avoids Connector/C 3.1.30's
-GnuTLS >= 3.4.2 requirement (EL7 ships GnuTLS 3.3.x), and eliminates the old
-`-DGNUTLS_NO_SIGNAL=0` workaround. The `bundled` comparison build uses wolfSSL
-in the server and GnuTLS in Connector/C. It is **not buildable on stock EL7**
-with Connector/C 3.1.30 without a supported, maintained newer GnuTLS dependency.
+EL7/EL8 default to `-DWITH_SSL=system` (system OpenSSL for both the server
+and Connector/C). This avoids Connector/C 3.1.30's GnuTLS >= 3.4.2 requirement
+on EL7's GnuTLS 3.3.x. EL9/EL10 default to `-DWITH_SSL=bundled` (wolfSSL
+server, GnuTLS Connector/C), avoiding MariaDB 10.4's incompatibility with
+system OpenSSL 3.x. Stock EL7 cannot build `bundled` with Connector/C 3.1.30.
 
 Oracle Linux 7 is end-of-life; the package repositories may eventually be
 moved or become inaccessible. Check repository access and GPG signing keys
@@ -176,8 +176,8 @@ For another 10.4 branch/tag, verify the source patch still applies cleanly.
 
 ### Focused SSL/TLS MTR regression test (local, opt-in)
 
-The RPM build defaults to `-DWITH_SSL=system` on EL7/8/9/10. To compare with
-`bundled`, invoke Mock with `--define 'mariadb_ssl_backend bundled'`.
+The default backend is `system` on EL7/EL8 and `bundled` on EL9/EL10.
+For the EL8 A/B comparison, override with `--define 'mariadb_ssl_backend bundled'`.
 additionally enables a focused `%check` in the **same** Mock buildroot: `main.ssl*`,
 `main.tls_*`, and a small `--ssl`-enabled client smoke (`main.1st` and `main.connect`).
 Regular Jenkins builds have MTR **off**; no Jenkins changes are required. MTR comes
@@ -226,10 +226,11 @@ done
 ls -lh "$TEST_ROOT/rpmbuild/SRPMS/"
 ```
 
-**Step 3: Build and run focused MTR checks inside Mock.** The EL7 `bundled`
-case is intentionally omitted: its GnuTLS 3.3.x is too old for Connector/C
-3.1.30. A failing build or MTR command stops the loop and must be investigated;
-**do not** treat the absence of an EL7 `bundled` run as a passing regression.
+**Step 3: Build and run focused MTR checks inside Mock.** Run EL7 with `system`,
+EL8 with both backends, and EL9/EL10 with `bundled`. Skip EL7 `bundled`
+(GnuTLS too old) and EL9/EL10 `system` (OpenSSL 3.x unsupported by MariaDB
+10.4). Only EL8 supports a direct A/B comparison with stock dependencies.
+A failing build or MTR command stops the loop and must be investigated.
 
 ```bash
 for EL in 7 8 9 10; do
@@ -243,7 +244,9 @@ for EL in 7 8 9 10; do
     -name "MariaDB-${VERSION}-*.el${EL}.src.rpm" -print -quit)
   test -n "$SRPM"
   for BACKEND in system bundled; do
-    if [ "$EL" = 7 ] && [ "$BACKEND" = bundled ]; then continue; fi
+    case "${EL}:${BACKEND}" in
+      7:bundled|9:system|10:system) continue ;;
+    esac
     OUT="$TEST_ROOT/results/el${EL}-${BACKEND}"
     mkdir -p "$OUT"
     mock -r "$MOCK_CONFIG" --rebuild "$SRPM" \
@@ -258,9 +261,9 @@ done
 whether SSL cases were skipped. Inspect the runtime requirements of all
 binary RPMs: `system` should use OpenSSL, while `bundled` normally uses
 GnuTLS for Connector/C (the server uses wolfSSL).
-The server also changes TLS backend. Retain the per-target Mock logs to compare
-backends and investigate failures; do not publish an RPM merely because it was
-built successfully.
+Retain the per-target Mock logs. Compare both backends on EL8; validate
+the supported default on EL7, EL9 and EL10 independently.
+Do not publish an RPM merely because it was built successfully.
 
 ```bash
 for OUT in "$TEST_ROOT"/results/el*-*; do
