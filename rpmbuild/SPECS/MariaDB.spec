@@ -60,6 +60,10 @@ BuildRequires: llvm lld clang
 %endif
 BuildRequires: procps-ng perl
 
+# MariaDB MTR requires Data::Dumper, which is packaged separately from
+# the Perl interpreter on EL7. Ensure it is available in the Mock buildroot.
+BuildRequires: perl(Data::Dumper)
+
 # EL7 still gets crypt(3) development headers from glibc. EL8+ split them into
 # libxcrypt-devel.
 %if 0%{?rhel} >= 8
