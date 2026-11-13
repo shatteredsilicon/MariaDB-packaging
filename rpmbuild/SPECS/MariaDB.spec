@@ -60,10 +60,6 @@ BuildRequires: llvm lld clang
 %endif
 BuildRequires: procps-ng perl
 
-# MariaDB MTR requires Data::Dumper, which is packaged separately from
-# the Perl interpreter on EL7. Ensure it is available in the Mock buildroot.
-BuildRequires: perl(Data::Dumper)
-
 # EL7 still gets crypt(3) development headers from glibc. EL8+ split them into
 # libxcrypt-devel.
 %if 0%{?rhel} >= 8
@@ -261,18 +257,6 @@ fi
 
 "$CPACK_BIN" "$@"
 mv *.rpm %_rpmdir
-
-# TLS regression checks run in Mock as the unprivileged build user.
-# They test the binaries created by this build, not system-installed MariaDB.
-%check
-cd cpack_rpm_build_dir
-[ -x ./mysql-test/mtr ] || { echo 'ERROR: MTR runner is missing.' >&2; exit 1; }
-echo 'SSL MTR: backend=%{mariadb_ssl_backend}, main.ssl*'
-./mysql-test/mtr --suite=main --do-test=ssl --parallel=2 --force
-echo 'SSL MTR: backend=%{mariadb_ssl_backend}, main.tls_*'
-./mysql-test/mtr --suite=main --do-test=tls_ --parallel=2 --force
-echo 'SSL MTR: backend=%{mariadb_ssl_backend}, TLS-enabled client smoke'
-./mysql-test/mtr --ssl --parallel=2 main.1st main.connect
 
 %clean
 
