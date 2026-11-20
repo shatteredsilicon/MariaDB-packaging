@@ -147,11 +147,11 @@ unchanged. Verify the resulting EL7 binaries and database workloads before
 publishing them. If EL7 SystemTap instrumentation is a firm requirement,
 investigate a separate toolchain or targeted source/build-system fix instead.
 
-EL7/EL8 default to `-DWITH_SSL=system` (system OpenSSL for both the server
-and Connector/C). This avoids Connector/C 3.1.30's GnuTLS >= 3.4.2 requirement
-on EL7's GnuTLS 3.3.x. EL9/EL10 default to `-DWITH_SSL=bundled` (wolfSSL
-server, GnuTLS Connector/C), avoiding MariaDB 10.4's incompatibility with
-system OpenSSL 3.x. Stock EL7 cannot build `bundled` with Connector/C 3.1.30.
+For 10.4.42, all EL7/EL8/EL9/EL10 targets default to
+`-DWITH_SSL=system` (system OpenSSL for the server and Connector/C). The
+MDEV-25785/MDEV-41008 backports enable OpenSSL 3 on EL9/EL10; do not assume
+this default is suitable for older unpatched 10.4 tags. EL7 still needs the
+system backend because Connector/C 3.1.30 requires newer GnuTLS than EL7 ships.
 
 Oracle Linux 7 is end-of-life; the package repositories may eventually be
 moved or become inaccessible. Check repository access and GPG signing keys
@@ -174,16 +174,20 @@ PowerTools enabled and its module metadata available.
 upstream-source patch only when `%{rhel} >= 10` in `%prep`. EL9 is untouched.
 For another 10.4 branch/tag, verify the source patch still applies cleanly.
 
-### Focused SSL/TLS MTR regression test (local, opt-in)
+### Focused SSL/TLS MTR regression checks (enabled in Mock/CI)
 
-The default backend is `system` on EL7/EL8 and `bundled` on EL9/EL10.
-For the EL8 A/B comparison, override with `--define 'mariadb_ssl_backend bundled'`.
-additionally enables a focused `%check` in the **same** Mock buildroot: `main.ssl*`,
-`main.tls_*`, and a small `--ssl`-enabled client smoke (`main.1st` and `main.connect`).
-Regular Jenkins builds have MTR **off**; no Jenkins changes are required. MTR comes
-from the matching compiled source tree, not a separately installed RPM. A successful
-build/MTR run is not proof of compatibility with every production TLS configuration;
-review skipped cases and test your deployed certificates, protocol policy and clients too.
+With the 10.4.42 SPEC update, regular Jenkins/Mock builds run a bounded
+`%check` using MTR from the newly compiled source tree, not a system-installed
+MariaDB. The checks cover `main.ssl_cipher`, `main.ssl_crl`,
+`main.tls_version`, `main.tls_version1`, `main.x509_oneline_separators`, and
+`main.1st` with `--ssl`. They use two workers and stop on the first failure;
+no broad `ssl*`/`tls_*` selection is used, to keep CI cost predictable.
+
+The outer `%install` is intentionally a no-op. `%check` runs MTR first and
+invokes CPack only on success. **Do not use `rpmbuild --nocheck` or a Mock
+configuration that skips `%check`: no binary RPMs will be generated.** Review
+PASS/FAIL/SKIP counts; skipped TLS cases do not demonstrate coverage. Passing
+MTR does not replace deployed certificate, protocol-policy and client testing.
 
 Run the commands in the same local Bash session, from the repository root.
 The workflow uses a temporary copy, so it does not modify your working spec.
@@ -192,12 +196,12 @@ Set `VERSION` to the version under test; check that the copied spec's
 preparing sources.
 
 **Step 1: Prepare a matching SRPM source tree.** The fork must contain the
-requested tag. This example uses MariaDB 10.4.40.
+requested tag and the changes. This example uses MariaDB 10.4.42.
 
 ```bash
 cd /path/to/mariadb-packaging
 set -euo pipefail
-export VERSION=10.4.40
+export VERSION=10.4.42
 export TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mariadb-ssl-mtr.XXXXXX")"
 cp -a rpmbuild "$TEST_ROOT/rpmbuild"
 SPEC="$TEST_ROOT/rpmbuild/SPECS/MariaDB.spec"
@@ -226,11 +230,11 @@ done
 ls -lh "$TEST_ROOT/rpmbuild/SRPMS/"
 ```
 
-**Step 3: Build and run focused MTR checks inside Mock.** Run EL7 with `system`,
-EL8 with both backends, and EL9/EL10 with `bundled`. Skip EL7 `bundled`
-(GnuTLS too old) and EL9/EL10 `system` (OpenSSL 3.x unsupported by MariaDB
-10.4). Only EL8 supports a direct A/B comparison with stock dependencies.
-A failing build or MTR command stops the loop and must be investigated.
+**Step 3: Build and run focused MTR checks inside Mock.** All four EL targets
+use the updated `system` backend by default. Each Mock rebuild runs `%check`
+before CPack creates binary RPMs. A failing build or MTR test blocks packaging;
+EL8 `bundled` A/B testing can still be requested separately with
+`--define 'mariadb_ssl_backend bundled'` if needed.
 
 ```bash
 for EL in 7 8 9 10; do
@@ -243,27 +247,18 @@ for EL in 7 8 9 10; do
   SRPM=$(find "$TEST_ROOT/rpmbuild/SRPMS" -maxdepth 1 -type f \
     -name "MariaDB-${VERSION}-*.el${EL}.src.rpm" -print -quit)
   test -n "$SRPM"
-  for BACKEND in system bundled; do
-    case "${EL}:${BACKEND}" in
-      7:bundled|9:system|10:system) continue ;;
-    esac
-    OUT="$TEST_ROOT/results/el${EL}-${BACKEND}"
-    mkdir -p "$OUT"
-    mock -r "$MOCK_CONFIG" --rebuild "$SRPM" \
-      --define "mariadb_ssl_backend $BACKEND" \
-      --resultdir "$OUT"
-  done
+  OUT="$TEST_ROOT/results/el${EL}-system"
+  mkdir -p "$OUT"
+  mock -r "$MOCK_CONFIG" --rebuild "$SRPM" --resultdir "$OUT"
 done
 ```
 
-**Step 4: Review the test summary and binary dependencies.** Check the
-`build.log` for the three `SSL MTR:` markers, real PASS/FAIL/SKIP counts, and
-whether SSL cases were skipped. Inspect the runtime requirements of all
-binary RPMs: `system` should use OpenSSL, while `bundled` normally uses
-GnuTLS for Connector/C (the server uses wolfSSL).
-Retain the per-target Mock logs. Compare both backends on EL8; validate
-the supported default on EL7, EL9 and EL10 independently.
-Do not publish an RPM merely because it was built successfully.
+**Step 4: Review the test summary and binary dependencies.** Check each
+`build.log` for the two `SSL MTR:` markers and actual PASS/FAIL/SKIP counts.
+Check that the selected tests executed rather than being silently skipped.
+Inspect binary RPM dependencies: the `system` backend should use OpenSSL.
+Retain the per-target Mock logs and validate runtime TLS behavior before
+publishing; a successful build alone is not a release qualification.
 
 ```bash
 for OUT in "$TEST_ROOT"/results/el*-*; do
@@ -324,8 +319,8 @@ the working-spec replacement to match. Branch-only builds do not rewrite the
 version or add a changelog entry; they remain build-only.
 
 **Important:** MariaDB's outer spec creates an SRPM, while CPack generates
-new RPM specs for binary components. During `%install`, the packaging spec
-extracts the updated `%changelog` section and passes it using
+new RPM specs for binary components. During `%check`, after MTR passes, the
+packaging spec extracts the updated `%changelog` section and passes it using
 `CPACK_RPM_CHANGELOG_FILE`. This ensures the same changelog is available to
 CPack-generated binary RPMs as well as the source RPM. When the source spec
 has no changelog entries (for example a branch-only build), the CPack argument
