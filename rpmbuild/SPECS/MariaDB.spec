@@ -1,13 +1,8 @@
 # The outer spec only produces the SRPM. Binary RPMs and their debuginfo
 # packages are built by CPack, which has independent generated specs.
-# EL7/EL8 default to system OpenSSL for both server and Connector/C.
-# EL9/EL10 use bundled wolfSSL for the server and GnuTLS for Connector/C.
+# b8-10.4.42 supports system OpenSSL (including OpenSSL 3 on EL9/EL10).
 # Explicit overrides remain available for testing.
-%if 0%{?rhel} < 9
 %{!?mariadb_ssl_backend:%global mariadb_ssl_backend system}
-%else
-%{!?mariadb_ssl_backend:%global mariadb_ssl_backend bundled}
-%endif
 %undefine _debugsource_packages
 %undefine _debuginfo_subpackages
 
@@ -182,9 +177,7 @@ export CPPFLAGS="${CPPFLAGS} -march=x86-64 -mtune=westmere"
 %endif
 %endif
 
-# EL7/EL8: system OpenSSL for both the server and Connector/C.
-# EL9/EL10: bundled wolfSSL for the server and GnuTLS for Connector/C,
-# avoiding MariaDB 10.4's incompatibility with system OpenSSL 3.x.
+# b8-10.4.42: system OpenSSL is supported on EL7 through EL10.
 "$CMAKE_BIN"  -DRPM=rh%{suffix:%dist} \
                   -DLZ4_LIBS=%{_libdir}/liblz4.so \
                   -DWITH_INNODB_LZ4=ON \
@@ -230,8 +223,21 @@ grep -Eq '^ENABLE_DTRACE:[^=]+=OFF$' CMakeCache.txt || {
 make %{?_smp_mflags}
 
 %install
+# The outer spec has no payload; CPack owns the binary RPMs.
+:
 
+%check
 cd cpack_rpm_build_dir
+[ -x ./mysql-test/mtr ] || { echo 'ERROR: built MTR runner missing.' >&2; exit 1; }
+# Exercise 10.4.42 TLS changes with a bounded, explicitly selected test set.
+# No --force: fail fast before producing binary RPMs.
+echo 'SSL MTR: backend=%{mariadb_ssl_backend}, focused TLS regressions'
+./mysql-test/mtr --parallel=2 --max-test-fail=1 \
+    main.ssl_cipher main.ssl_crl main.tls_version main.tls_version1 \
+    main.x509_oneline_separators
+echo 'SSL MTR: backend=%{mariadb_ssl_backend}, TLS client smoke'
+./mysql-test/mtr --ssl --parallel=2 --max-test-fail=1 main.1st
+# CPack runs only after MTR succeeds; do not use rpmbuild --nocheck.
 %if 0%{?rhel} == 7
 CPACK_BIN=/usr/bin/cpack3
 %else
